@@ -2,6 +2,8 @@
 
 Xeno Capture is an open-source Windows x64 app for viewing and recording HDMI video from a capture card. Play in a window or fullscreen on a monitor you choose, listen to capture audio on your PC, and save local MP4 recordings or PNG snapshots. The desktop app uses WPF and Direct3D 11.
 
+<img width="2559" height="1390" alt="image" src="https://github.com/user-attachments/assets/c66240a0-529d-494b-bac1-5d8206d00d7e" />
+
 **Frame generation and NVIDIA RTX Video AI upscaling are experimental preview features.** They process the captured image on the PC, are off by default, and leave recordings and snapshots on their existing paths. Use the standard preview to see the source cadence with the least processing.
 
 ## Scope
@@ -100,3 +102,5 @@ Current AI-filter and pacing evidence is in **AI PREVIEW AND PACING REVIEW.md**;
 Xeno Capture's original source code and documentation are licensed under the [MIT License](LICENSE).
 
 NVIDIA components have their own terms. The NVIDIA Image Scaling and Optical Flow headers carry their respective MIT notices. The RTX Video SDK and model are covered by NVIDIA's separate license, included as `gpu/NVIDIA_RTX_Video_SDK_License.pdf` with the build. See [Third-party notices](THIRD-PARTY%20NOTICES.txt).
+
+
