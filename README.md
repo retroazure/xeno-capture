@@ -1,8 +1,8 @@
 # Xeno Capture
 
-Xeno Capture is an open-source Windows x64 app for viewing and recording HDMI video from a capture card. Play in a window or fullscreen on a monitor you choose, listen to capture audio on your PC, and save local MP4 recordings or PNG snapshots. The desktop app uses WPF and Direct3D 11.
-
 <img width="2559" height="1390" alt="image" src="https://github.com/user-attachments/assets/c66240a0-529d-494b-bac1-5d8206d00d7e" />
+
+Xeno Capture is an open-source Windows x64 app for viewing and recording HDMI video from a capture card. Play in a window or fullscreen on a monitor you choose, listen to capture audio on your PC, and save local MP4 recordings or PNG snapshots. The desktop app uses WPF and Direct3D 11.
 
 **Frame generation and NVIDIA RTX Video AI upscaling are experimental preview features.** They process the captured image on the PC, are off by default, and leave recordings and snapshots on their existing paths. Use the standard preview to see the source cadence with the least processing.
 
