@@ -1,0 +1,50 @@
+XENO CAPTURE 0.9.8
+
+Xeno Capture is an open-source Windows app for previewing and recording
+HDMI video from a capture card. It supports windowed or fullscreen viewing,
+PC audio monitoring, and local MP4 recordings and PNG snapshots. Keep the
+controller connected to the console. See README.md for the project scope
+and LICENSE for the original code's MIT license.
+
+Close the older running copy, then open XenoCapture.exe.
+Keep the gpu folder beside the executable.
+Click Play to start in the embedded preview.
+Choose a monitor under Output > Fullscreen display, then press Fullscreen or F11.
+Esc or F11 animates the fullscreen image into the embedded preview.
+Smooth jagged edges in fullscreen is on by default under Output.
+Use Feedback in the top bar to control animations, including the fullscreen pop, and interface sounds.
+New recordings use the Xeno Capture folder in place of the old default folder.
+
+Appearance: use Light mode / Dark mode in the top bar. Xeno Capture saves your choice when you close the app. On first launch it imports settings from the previous app name if available.
+
+EXPERIMENTAL AI UPSCALING (preview only, off by default)
+Output > AI Video Super Resolution > enable the switch.
+Choose Auto, 720p, 1080p, 1440p or 4K processing, then Performance,
+Balanced, High or Ultra quality. High is the starting quality.
+The status shows the actual enhanced dimensions. Aspect ratio is kept;
+higher-resolution inputs are not reduced. A smaller window fits the
+processed image back to its visible size.
+
+The filter uses NVIDIA RTX Video Super Resolution on a compatible RTX GPU.
+It temporarily takes priority over Standard / Normal / RTX Video.
+Turning it off restores your selection. Recording/audio are independent.
+First use initializes the model. Higher quality/resolution costs GPU work.
+
+Fullscreen smooths short bursts of early source frames even with generation
+off. An early frame can wait up to 2 ms. Late frames proceed immediately.
+
+EXPERIMENTAL FRAME GENERATION (preview only, off by default)
+To test smoother motion, choose Adaptive 2x, 3x or 4x frame generation.
+Leave Force 30 FPS game cadence off for automatic content detection.
+30 FPS games target 60 / 90 / 120 FPS; 60 FPS games target 120 / 180 / 240.
+The screen must support the target, and the GPU must finish processing
+within that interval. The counter separates shown, generated and input FPS.
+Generation adds one content frame of buffering. Motion checks preserve
+source frames on scene cuts and suppress interpolation when too much
+high-contrast motion cannot be matched.
+
+This update reuses loaded AI features on target changes, avoids duplicate
+inference on identical capture frames, and anchors pacing to input arrivals.
+It also keeps the loaded AI model between windowed and fullscreen playback.
+See AI PREVIEW AND PACING REVIEW.md for tests and remaining limits.
+Fast motion, HUD edges and scene changes can still show artifacts or repeats.

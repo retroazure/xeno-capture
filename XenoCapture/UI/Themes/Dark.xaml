@@ -1,0 +1,24 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <SolidColorBrush x:Key="WindowBrush" Color="#15171D"/>
+  <SolidColorBrush x:Key="CardBrush" Color="#20232A"/>
+  <SolidColorBrush x:Key="InsetBrush" Color="#191B22"/>
+  <SolidColorBrush x:Key="ControlBrush" Color="#282C35"/>
+  <SolidColorBrush x:Key="LineBrush" Color="#383D49"/>
+  <SolidColorBrush x:Key="ControlLineBrush" Color="#505666"/>
+  <SolidColorBrush x:Key="TextBrush" Color="#F5F5F8"/>
+  <SolidColorBrush x:Key="Muted" Color="#B0B6C6"/>
+  <SolidColorBrush x:Key="Accent" Color="#68DDD0"/>
+  <SolidColorBrush x:Key="AccentSoft" Color="#193633"/>
+  <SolidColorBrush x:Key="BrandBrush" Color="#C52B49"/>
+  <SolidColorBrush x:Key="BrandHoverBrush" Color="#DB3455"/>
+  <SolidColorBrush x:Key="OnBrandBrush" Color="#FFFFFF"/>
+  <SolidColorBrush x:Key="FocusBrush" Color="#79EEE1"/>
+  <SolidColorBrush x:Key="HoverBrush" Color="#323742"/>
+  <SolidColorBrush x:Key="SelectedBrush" Color="#303E47"/>
+  <SolidColorBrush x:Key="EmptyBrush" Color="#181C25"/>
+  <SolidColorBrush x:Key="ErrorBrush" Color="#FF9BA8"/>
+  <SolidColorBrush x:Key="RecordSurface" Color="#492531"/>
+  <SolidColorBrush x:Key="RecordText" Color="#FFB3BF"/>
+  <SolidColorBrush x:Key="IdleBrush" Color="#858DA1"/>
+  <SolidColorBrush x:Key="TrackBrush" Color="#454B5B"/>
+</ResourceDictionary>

@@ -1,0 +1,8 @@
+**/bin/
+**/obj/
+artifacts/
+.vs/
+*.user
+
+# Install the NVIDIA RTX Video SDK locally before building.
+/XenoCapture/ThirdParty/RTXVideo/

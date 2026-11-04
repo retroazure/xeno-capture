@@ -1,0 +1,62 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>XenoCapture</AssemblyName>
+    <Product>Xeno Capture</Product>
+    <AssemblyTitle>Xeno Capture</AssemblyTitle>
+    <ApplicationIcon>UI\Xeno.ico</ApplicationIcon>
+    <RootNamespace>XenoCapture</RootNamespace>
+    <PlatformTarget>x64</PlatformTarget>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>0.9.8</Version>
+    <MinimumRuntimePatch>10.0.14</MinimumRuntimePatch>
+    <RuntimeFrameworkVersion Condition="'$(SelfContained)' != 'true' and '$(RuntimeFrameworkVersion)' == ''">$(MinimumRuntimePatch)</RuntimeFrameworkVersion>
+    <Description>Native capture-card preview, upscaling and recording.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="UI\Xeno.ico" />
+    <EmbeddedResource Include="ThirdParty\NIS\NIS.cso" LogicalName="XenoCapture.NIS.Shader" />
+    <EmbeddedResource Include="ThirdParty\NIS\nis-scale.bin" LogicalName="XenoCapture.NIS.Scale" />
+    <EmbeddedResource Include="ThirdParty\NIS\nis-usm.bin" LogicalName="XenoCapture.NIS.Usm" />
+    <EmbeddedResource Include="ThirdParty\NIS\licence.txt" LogicalName="XenoCapture.NIS.License" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Shaders\PreviewVertex.cso" LogicalName="XenoCapture.Preview.Vertex" />
+    <EmbeddedResource Include="Shaders\PreviewPixel.cso" LogicalName="XenoCapture.Preview.Pixel" />
+    <EmbeddedResource Include="Shaders\PreviewAiPixel.cso" LogicalName="XenoCapture.Preview.AiPixel" />
+    <EmbeddedResource Include="Shaders\FrameDownsample.cso" LogicalName="XenoCapture.Frame.Downsample" />
+    <EmbeddedResource Include="Shaders\FrameCompare.cso" LogicalName="XenoCapture.Frame.Compare" />
+    <EmbeddedResource Include="Shaders\FrameMotion.cso" LogicalName="XenoCapture.Frame.Motion" />
+    <EmbeddedResource Include="Shaders\FrameHardware.cso" LogicalName="XenoCapture.Frame.Hardware" />
+    <EmbeddedResource Include="Shaders\FrameSynthesize.cso" LogicalName="XenoCapture.Frame.Synthesize" />
+    <EmbeddedResource Include="Shaders\FrameSynthesizeSlow.cso" LogicalName="XenoCapture.Frame.SynthesizeSlow" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Native\bin\XenoGpuBridge.dll" Link="gpu\XenoGpuBridge.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="ThirdParty\RTXVideo\nvngx_vsr.dll" Link="gpu\nvngx_vsr.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="ThirdParty\RTXVideo\NVIDIA_RTX_Video_SDK_License.pdf" Link="gpu\NVIDIA_RTX_Video_SDK_License.pdf" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+  </ItemGroup>
+  <Target Name="RequireServicedRuntime" AfterTargets="ProcessFrameworkReferences">
+    <Error Condition="'%(RuntimeFramework.Version)' != '' and $([MSBuild]::VersionLessThan('%(RuntimeFramework.Version)', '$(MinimumRuntimePatch)'))"
+           Text="Xeno Capture requires .NET $(MinimumRuntimePatch) or later. Update the .NET SDK or remove the older runtime override." />
+  </Target>
+  <Target Name="EmbedGpuBridgeHash" BeforeTargets="GetAssemblyAttributes">
+    <GetFileHash Files="$(MSBuildProjectDirectory)/Native/bin/XenoGpuBridge.dll" Algorithm="SHA256">
+      <Output TaskParameter="Hash" PropertyName="XenoGpuBridgeSha256" />
+    </GetFileHash>
+    <ItemGroup>
+      <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+        <_Parameter1>XenoGpuBridgeSha256</_Parameter1>
+        <_Parameter2>$(XenoGpuBridgeSha256)</_Parameter2>
+      </AssemblyAttribute>
+    </ItemGroup>
+  </Target>
+</Project>
+
+
