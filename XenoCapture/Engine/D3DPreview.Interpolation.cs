@@ -33,6 +33,7 @@ internal sealed unsafe partial class D3DPreview
     internal long ExactInterpolationRepeats { get; private set; }
     public bool HasInterpolationFrame => frameCurrent >= 0;
     public bool HasInterpolationPair => framePrevious >= 0;
+    internal long InterpolationPairRevision => frameCurrent < 0 ? 0 : frameRgbRevision[frameCurrent];
     public bool FrameWasDuplicate { get; private set; }
     public bool CanGenerateMidpoint { get; private set; }
     public string? FrameGenerationFailure { get; private set; }
@@ -40,9 +41,11 @@ internal sealed unsafe partial class D3DPreview
     public double FrameAnalysisMs { get; private set; }
     public double FrameMotionConfidence { get; private set; }
     public double GeneratedPixelFraction { get; private set; }
+    internal double UnmatchedHighContrastFraction { get; private set; }
     internal bool DisableFrameBudgetForDiagnostics { get; set; }
     internal bool DisableFastBoundaryRecoveryForDiagnostics { get; set; }
     internal bool DisableAlternateWarpForDiagnostics { get; set; }
+    internal bool DisableBackgroundRecoveryForDiagnostics { get; set; }
     internal bool ForceFrameGenerationUnavailable { get; set; }
     public PresentedFrame CachedFrame => new(frameCurrentTime, frameCurrentDuration);
     public PresentedFrame PreviousFrame => new(framePreviousTime, framePreviousDuration);
@@ -198,7 +201,8 @@ internal sealed unsafe partial class D3DPreview
         Com source = frameRgb[framePrevious]!.View;
         long revision = frameRgbRevision[framePrevious];
         PresentationKind kind = PresentationKind.Repeated;
-        long start = Stopwatch.GetTimestamp(); GeneratedPixelFraction=0;
+        long start = Stopwatch.GetTimestamp();
+        GeneratedPixelFraction = UnmatchedHighContrastFraction = 0;
         if (CanGenerateMidpoint)
         {
             ClearFrameStatistics();
@@ -209,11 +213,15 @@ internal sealed unsafe partial class D3DPreview
             uint flags = HardwareOpticalFlowActive ? 2u : 0u;
             if (DisableFastBoundaryRecoveryForDiagnostics) flags |= 4u;
             if (DisableAlternateWarpForDiagnostics) flags |= 8u;
+            if (DisableBackgroundRecoveryForDiagnostics) flags |= 16u;
             FrameCompute(shader, frameRgb[framePrevious]!.View, frameRgb[frameCurrent]!.View, frameForward!.View, frameBackward!.View, frameGenerated!.Attachment, null, frameStatsView, (frameWidth + 15) / 16, (frameHeight + 7) / 8, (float)step / multiplier, flags);
             var generated = ReadFrameStatistics();
             // The synthesis pass counts high-contrast pixels with no verified warp.
             int pixels = frameWidth * frameHeight;
-            bool unsafeSynthesis = generated.Changed > pixels / 8 && generated.Generated < generated.Changed * 2;
+            UnmatchedHighContrastFraction = generated.Changed / (double)pixels;
+            bool extensiveUnmatchedMotion = generated.Changed > pixels / 8;
+            bool unsafeSynthesis = extensiveUnmatchedMotion &&
+                (multiplier <= 3 || generated.Generated < generated.Changed * 2);
             if (unsafeSynthesis)
             {
                 CanGenerateMidpoint = false;

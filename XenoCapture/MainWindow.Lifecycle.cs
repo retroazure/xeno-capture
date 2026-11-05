@@ -1,3 +1,6 @@
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Windows.Threading;
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
@@ -62,6 +65,8 @@ public partial class MainWindow
     {
         var v = video; var a = audio; var d = demo;
         video = null; audio = null; demo = null;
+        phoneWindowPreview = false;
+        if (phoneAudioBackend != null) SetPhoneAudioBackend(null);
         MonitorToggle.IsChecked = false;
         await Task.WhenAll(StopMonitor(), v?.Stop() ?? Task.CompletedTask, a?.Stop() ?? Task.CompletedTask, d?.Stop() ?? Task.CompletedTask);
     }
@@ -110,6 +115,31 @@ public partial class MainWindow
         lock (recorderGate) { if (!ReferenceEquals(recorder, owner) && !ReferenceEquals(pendingRecorder, owner)) return; }
         await StopRecording(); if (!closing) SetStatus("Recording stopped: " + FriendlyError(ex), true);
     });
+
+    static string FriendlyError(Exception ex)
+    {
+        if (ex is COMException ce) return ce.HResult switch
+        {
+            unchecked((int)0x80070005) => "Access denied. Enable desktop camera/microphone access in Windows Privacy settings.",
+            unchecked((int)0xC00D3704) => "The device is in use. Close other apps that are using it.",
+            _ => $"{ex.Message} (0x{ce.HResult:X8})"
+        };
+        return ex.Message;
+    }
+    async void OnClosing(object? sender, CancelEventArgs e)
+    {
+        if (mayClose) return; e.Cancel = true; if (closing) return;
+        closing = true; sessions.Close(); ++modeRequest; IsEnabled = false; SaveSettings();
+        if (discoverHardware) _ = interfaceSounds.SilenceAsync();
+        await System.Windows.Threading.Dispatcher.Yield(DispatcherPriority.Background);
+        try { await Disconnect(); }
+        catch (Exception) { /* Close still releases the remaining managed UI resources below. */ }
+        finally
+        {
+            metricsTimer.Stop(); activePreview = null;
+            lock (frameGate) { latest?.Dispose(); latest = null; }
+            try { await embeddedPreview.StopAsync(); embeddedPreview.Dispose(); } catch { }
+            mayClose = true; Close();
+        }
+    }
 }
-
-

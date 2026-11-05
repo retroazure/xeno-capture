@@ -59,10 +59,49 @@ internal static class RenderPerformanceDiagnostics
             states.Add(Convert.ToHexString(SHA256.HashData(renderer.Readback())));
         }
         return new() { ["previewShadersPrecompiled"] = true, ["rendererConstructionMs"] = construction, ["warmConstructionMeanMs"] = construction.Skip(1).Average(),
-            ["cases"] = cases, ["settingTransitionPixelHashes"] = states, ["framesPerWorkload"] = 840,
+            ["cases"] = cases, ["performancePreview"] = ComparePreviewFilters(),
+            ["settingTransitionPixelHashes"] = states, ["framesPerWorkload"] = 840,
             ["batchTimingIncludesFinalGpuReadback"] = true, ["measuresMonitorPresentation"] = false,
             ["captureHardware"] = "not exercised", ["result"] = "PASS" };
     }
+    static object ComparePreviewFilters()
+    {
+        var results = new List<object>();
+        foreach (int height in new[] { 1080, 2160 })
+        {
+            using var frame = Pattern(1920, 1080, PixelLayout.Nv12);
+            using var renderer = new D3DPreview(0, height * 16 / 9, height);
+            renderer.Draw(frame, 0);
+            var unfiltered = renderer.Readback();
+            renderer.EdgeSmoothing = true;
+            renderer.Draw(frame, .25, PreviewUpscaler.Performance);
+            if (!unfiltered.AsSpan().SequenceEqual(renderer.Readback()))
+                throw new InvalidOperationException("Performance preview did not preserve plain scaling and NV12 color.");
+
+            var filtered = new List<double>();
+            var performance = new List<double>();
+            const int frames = 90;
+            for (int batch = 0; batch < 5; batch++)
+            {
+                filtered.Add(Measure(PreviewUpscaler.Standard));
+                performance.Add(Measure(PreviewUpscaler.Performance));
+            }
+            results.Add(new { outputHeight = height, filteredMedianMs = filtered.Order().ElementAt(2),
+                performanceMedianMs = performance.Order().ElementAt(2), plainScalingPixelMatch = true });
+
+            double Measure(PreviewUpscaler upscaler)
+            {
+                renderer.Draw(frame, .25, upscaler);
+                renderer.Readback();
+                var clock = Stopwatch.StartNew();
+                for (int i = 0; i < frames; i++) renderer.Draw(frame, .25, upscaler);
+                renderer.Readback();
+                return clock.Elapsed.TotalMilliseconds / frames;
+            }
+        }
+        return results;
+    }
+
     static Packet Pattern(int width, int height, PixelLayout layout)
     {
         var frame = new Packet(width * height * (layout == PixelLayout.Nv12 ? 3 : 8) / 2, false, width, height, layout);

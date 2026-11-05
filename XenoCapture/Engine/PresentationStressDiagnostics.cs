@@ -37,6 +37,28 @@ internal static class PresentationStressDiagnostics
         var checks = new Dictionary<string, object>();
         void Save() => File.WriteAllText(Path.Combine(folder, "results.json"), JsonSerializer.Serialize(checks, new JsonSerializerOptions { WriteIndented = true }));
         void Stage(string text) => File.WriteAllText(Path.Combine(folder, "stage.txt"), text);
+        if (Array.IndexOf(Environment.GetCommandLineArgs(), "--startup-latency-only") >= 0)
+        {
+            Stage("preview startup");
+            var cold = new List<double>();
+            var warmed = new List<double>();
+            for (int trial = 0; trial < 3; trial++)
+            {
+                cold.Add(await MeasurePreviewStartup(warmup: false));
+                warmed.Add(await MeasurePreviewStartup(warmup: true));
+            }
+            await WaitFor(() => Direct3DHost.LiveRenderers == 0 && Packet.LiveBuffers == bufferBaseline);
+            checks["coldFirstPresentMs"] = cold;
+            checks["overlappedFirstPresentMs"] = warmed;
+            checks["coldMedianMs"] = cold.Order().ElementAt(1);
+            checks["overlappedMedianMs"] = warmed.Order().ElementAt(1);
+            checks["inputOpenDelayMs"] = 200;
+            checks["measuresMonitorScanout"] = false;
+            checks["result"] = "PASS";
+            Stage("complete");
+            Save();
+            return;
+        }
         Stage("readiness race regressions");
         using (var host = new Direct3DHost { Active = true })
         {
@@ -83,8 +105,8 @@ internal static class PresentationStressDiagnostics
             checks["usesPhysicalCaptureCard"] = false; checks["measuresMonitorScanout"] = false;
             checks["result"] = "PASS"; Stage("complete"); Save(); return;
         }
-        Stage("1080p60 native fullscreen pacing under arrival jitter");
-        checks["nativeFullscreenPacing"] = await RunNativeCadence();
+        Stage("1080p60 latest-frame playback under arrival jitter");
+        checks["nativeSourcePlayback"] = await RunNativePlayback();
         Save();
         if (Array.IndexOf(Environment.GetCommandLineArgs(), "--native-pacing-only") >= 0)
         {
@@ -157,7 +179,36 @@ internal static class PresentationStressDiagnostics
         if (upscaler == PreviewUpscaler.Enhanced && enhancedFrames == 0) throw new InvalidOperationException("The enhanced presentation soak never ran its upscaling pipeline.");
         checks["result"] = "PASS"; Stage("complete"); Save();
     }
-    static async Task<Dictionary<string, object>> RunNativeCadence()
+    static async Task<double> MeasurePreviewStartup(bool warmup)
+    {
+        var source = new TestCaptureBackend(delayOpen: true) { Produce = true };
+        var main = new MainWindow(false, false, (_, _) => new CaptureStream(() => source, TimeSpan.FromSeconds(2)))
+        {
+            ShowActivated = false,
+            DiagnosticDisablePreviewWarmup = !warmup
+        };
+        main.DiagnosticPrepareInput();
+        main.Show();
+        try
+        {
+            Task connecting = main.DiagnosticConnect();
+            await source.OpenEntered.Task.WaitAsync(TimeSpan.FromSeconds(4));
+            await Task.Delay(200);
+            var timer = Stopwatch.StartNew();
+            source.ReleaseBlockedCalls();
+            await connecting.WaitAsync(TimeSpan.FromSeconds(4));
+            await WaitFor(() => main.DiagnosticPresented > 0 || main.DiagnosticPreviewError != null);
+            if (main.DiagnosticPreviewError != null) throw main.DiagnosticPreviewError;
+            return timer.Elapsed.TotalMilliseconds;
+        }
+        finally
+        {
+            source.ReleaseBlockedCalls();
+            await main.DiagnosticClose().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    static async Task<Dictionary<string, object>> RunNativePlayback()
     {
         const long period = 166667, arrivalJitter = 30_000;
         var source = new PacedVideoBackend(1920, 1080, arrivalJitter);
@@ -167,14 +218,16 @@ internal static class PresentationStressDiagnostics
         try
         {
             main.DiagnosticPrepareInput();
-            await main.DiagnosticConnectFullscreen();
-            var host = main.DiagnosticPreview ?? throw new InvalidOperationException("No native fullscreen host.");
-            async Task<Dictionary<string, double>> Sample(bool disabled)
+            await main.DiagnosticConnect();
+            async Task<Dictionary<string, double>> Sample(Direct3DHost host)
             {
-                host.DiagnosticDisableSourcePacing = disabled;
                 await Task.Delay(350);
                 var frames = new List<(long At, long Time)>();
-                void OnPresent(PresentedFrame frame) { lock (frames) frames.Add((Clock.Now, frame.Time)); }
+                void OnPresent(PresentedFrame frame)
+                {
+                    if (frame.Kind == PresentationKind.Source)
+                        lock (frames) frames.Add((Clock.Now, frame.Time));
+                }
                 host.FramePresented += OnPresent;
                 var elapsed = Stopwatch.StartNew();
                 try { await Task.Delay(3000); }
@@ -183,7 +236,7 @@ internal static class PresentationStressDiagnostics
                 lock (frames) sample = frames.ToArray();
                 double fps = sample.Length / elapsed.Elapsed.TotalSeconds;
                 if (fps < 55 || host.GeneratedPresentations != 0)
-                    throw new InvalidOperationException($"Native fullscreen was not presenting the captured source at 60 FPS ({fps:F2}).");
+                    throw new InvalidOperationException($"Native preview was not presenting the captured source at 60 FPS ({fps:F2}).");
                 var gaps = sample.Zip(sample.Skip(1), (a, b) => (b.At - a.At) / 10000.0).ToArray();
                 var ages = sample.Select(frame => (frame.At - frame.Time) / 10000.0).Order().ToArray();
                 var deviations = gaps.Select(gap => Math.Abs(gap - period / 10000.0)).Order().ToArray();
@@ -192,12 +245,27 @@ internal static class PresentationStressDiagnostics
                 {
                     ["fps"] = fps, ["gapDeviationP95Ms"] = At(deviations, .95),
                     ["gapP99Ms"] = At(gaps.Order().ToArray(), .99), ["sampleAgeP50Ms"] = At(ages, .50),
-                    ["sampleAgeP95Ms"] = At(ages, .95)
+                    ["sampleAgeP95Ms"] = At(ages, .95), ["frameWaitTimeouts"] = host.FrameWaitTimeouts
                 };
             }
-            var unpaced = await Sample(true);
-            var paced = await Sample(false);
-            return new() { ["unpaced"] = unpaced, ["paced"] = paced, ["injectedAlternateDelayMs"] = arrivalJitter / 10000.0 };
+            var windowed = await Sample(main.DiagnosticPreview ?? throw new InvalidOperationException("No windowed preview host."));
+            await main.DiagnosticFullscreen();
+            var fullscreen = main.DiagnosticPreview ?? throw new InvalidOperationException("No fullscreen preview host.");
+            var standard = await Sample(fullscreen);
+
+            main.DiagnosticSelectUpscaler(PreviewUpscaler.Performance);
+            string saved = main.DiagnosticSettingsJson;
+            main.DiagnosticSelectUpscaler(PreviewUpscaler.Standard);
+            main.DiagnosticApplySettingsJson(saved);
+            if (main.DiagnosticUpscaler != PreviewUpscaler.Performance || fullscreen.Upscaler != PreviewUpscaler.Performance)
+                throw new InvalidOperationException("The Performance setting did not restore to the live preview.");
+            var performance = await Sample(fullscreen);
+            return new()
+            {
+                ["windowed"] = windowed, ["fullscreen"] = standard, ["fullscreenPerformance"] = performance,
+                ["performancePreferenceRoundTrip"] = "pass", ["injectedAlternateDelayMs"] = arrivalJitter / 10000.0,
+                ["measuresMonitorScanout"] = false
+            };
         }
         finally { await main.DiagnosticClose().WaitAsync(TimeSpan.FromSeconds(5)); }
     }

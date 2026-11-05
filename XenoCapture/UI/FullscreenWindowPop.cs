@@ -38,7 +38,7 @@ internal sealed class FullscreenDockMotion(Rectangle window, Rectangle start, Re
     internal long PresentedAt => Volatile.Read(ref presentedAt);
     internal void Presented(long sampleTime) => Volatile.Write(ref presentedAt, sampleTime);
     internal bool Landed { get; set; }
-    internal Com? Surface { get; set; }
+    internal XenoCapture.Engine.Com? Surface { get; set; }
 
     internal (Rectangle Window, Rectangle Clip, int Diameter, bool Complete) Sample(long now)
     {

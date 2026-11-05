@@ -46,7 +46,6 @@ internal sealed class Direct3DHost : HwndHost
     public long GeneratedPresentations => Interlocked.Read(ref generatedPresentations);
     public long RepeatedPresentations => Interlocked.Read(ref repeatedPresentations);
     internal double DiagnosticRefreshRate { get; set; }
-    internal volatile bool DiagnosticDisableSourcePacing;
     AiVideoSettings aiVideo=AiVideoSettings.Off;bool aiVideoActive;string aiVideoStatus="Off";string? aiVideoFallbackReason;
     public AiVideoSettings AiVideo {get=>Volatile.Read(ref aiVideo);set{lock(gate){if(!stopping){Volatile.Write(ref aiVideo,AiVideoSettings.Validate(value));signal.Set();}}}}
     long vsrFeatureCreations;
@@ -88,7 +87,7 @@ internal sealed class Direct3DHost : HwndHost
     }
     public double Sharpness { get => Volatile.Read(ref sharpness); set => Volatile.Write(ref sharpness, value); }
     readonly PreviewRendererHandoff? handoff;
-    readonly bool paceSourceFrames, animateFullscreenEntry;
+    readonly bool isFullscreen, animateFullscreenEntry;
     const long EntryRedrawInterval = 83_334; // Up to 120 Hz.
     long fullscreenEntryStarted;
     FullscreenDockMotion? fullscreenDock;
@@ -110,10 +109,10 @@ internal sealed class Direct3DHost : HwndHost
             return true;
         }
     }
-    public Direct3DHost(PreviewRendererHandoff? handoff = null, bool paceSourceFrames = false, bool animateFullscreenEntry = false)
+    public Direct3DHost(PreviewRendererHandoff? handoff = null, bool isFullscreen = false, bool animateFullscreenEntry = false)
     {
         this.handoff = handoff;
-        this.paceSourceFrames = paceSourceFrames;
+        this.isFullscreen = isFullscreen;
         this.animateFullscreenEntry = animateFullscreenEntry;
         Focusable = true;
         SizeChanged += (_, _) => UpdateSize();
@@ -187,11 +186,11 @@ internal sealed class Direct3DHost : HwndHost
             int cadencePhase=0,cadenceStep=0;
             long viewportWaitLimit = Clock.Now + 300_000;
             long cadenceLead=15_000, lastPresentedAt=0;
-            long lastSourceTime=0, lastSourceArrival=0, lastSourcePresentedAt=0;
+            long lastGeneratedPair = 0;
             long entryRedrawAt = 0;
             PresentedFrame lastMotionFrame = default;
             bool entryAnimating = animateFullscreenEntry;
-            bool sourceTimerUnavailable=false;
+            bool entryTimerUnavailable=false;
             nint renderSignal = signal.SafeWaitHandle.DangerousGetHandle();
             long period = 0, sourceCapturePeriod=0, refreshChecked = 0;
             int sourceWidth = 0, sourceHeight = 0, multiplier = 2; double refreshHz = 0; string? timingFailure = null;
@@ -227,7 +226,7 @@ internal sealed class Direct3DHost : HwndHost
                 if (updateAi) gpu.AiVideo = AiVideo;
                 gpu.Resize(Volatile.Read(ref pixelWidth), Volatile.Read(ref pixelHeight));
                 gpu.EdgeSmoothing = EdgeSmoothing;
-                gpu.RetainFullscreenOutput = paceSourceFrames || animateFullscreenEntry;
+                gpu.RetainFullscreenOutput = isFullscreen || animateFullscreenEntry;
                 if (entryAnimating)
                 {
                     long started = FullscreenEntryStarted;
@@ -317,12 +316,11 @@ internal sealed class Direct3DHost : HwndHost
             while (true)
             {
                 bool enabled, pending;
-                long candidatePeriod, candidateTime, candidateArrival;
+                long candidatePeriod;
                 int candidateWidth, candidateHeight;
                 lock (gate)
                 {
                     if (stopping) break; enabled = active; pending = enabled && latest != null;
-                    candidateTime = latest?.Time ?? 0; candidateArrival = latestArrival;
                     candidatePeriod = latest?.Duration ?? sourceCapturePeriod; candidateWidth = latest?.Width ?? sourceWidth; candidateHeight = latest?.Height ?? sourceHeight;
                 }
                 var requested = FrameGeneration; multiplier = FrameGenerationPolicy.Multiplier(requested); content30=Capped30Game;
@@ -335,7 +333,6 @@ internal sealed class Direct3DHost : HwndHost
                         PublishIdleAiStatus();
                     }
                     timingFailure=null;previousMode=requested;previousContent30=content30;cadenceDue=0;cadenceStep=0;Volatile.Write(ref frameGenerationActive,false);
-                    lastSourceArrival = 0;
                     lock(gate){inactiveWaiter?.TrySetResult();inactiveWaiter=null;}
                     signal.WaitOne();continue;
                 }
@@ -361,7 +358,7 @@ internal sealed class Direct3DHost : HwndHost
                 {
                     // Auto sizes inference to the fullscreen viewport. Avoid
                     // presenting at a transient size immediately before DXGI resize.
-                    if (paceSourceFrames && AiVideo is { Enabled: true, OutputHeight: 0 })
+                    if (isFullscreen && AiVideo is { Enabled: true, OutputHeight: 0 })
                     {
                         long readyAt = Math.Min(viewportWaitLimit, Volatile.Read(ref viewportChangedAt) + 120_000);
                         if (Clock.Now < readyAt)
@@ -435,7 +432,7 @@ internal sealed class Direct3DHost : HwndHost
                             long remaining = entryRedrawAt - Clock.Now;
                             if (remaining > 0)
                             {
-                                if (!sourceTimerUnavailable)
+                                if (!entryTimerUnavailable)
                                 {
                                     try
                                     {
@@ -443,7 +440,7 @@ internal sealed class Direct3DHost : HwndHost
                                         deadline.WaitUntil(entryRedrawAt);
                                         continue;
                                     }
-                                    catch (System.ComponentModel.Win32Exception) { sourceTimerUnavailable = true; }
+                                    catch (System.ComponentModel.Win32Exception) { entryTimerUnavailable = true; }
                                 }
                                 signal.WaitOne((int)((remaining + 9_999) / 10_000));
                                 continue;
@@ -461,21 +458,6 @@ internal sealed class Direct3DHost : HwndHost
                         signal.WaitOne(); lock (gate) { if (!stopping && active && latest == null) Interlocked.Increment(ref emptyWakeups); }
                         continue;
                     }
-                    if (paceSourceFrames && !DiagnosticDisableSourcePacing && !sourceTimerUnavailable)
-                    {
-                        long holdUntil = FrameGenerationPolicy.SourceHoldUntil(candidateTime, candidatePeriod, candidateArrival,
-                            lastSourceTime, lastSourceArrival, lastSourcePresentedAt, gpu.LastUploadDrawMs);
-                        if (Clock.Now < holdUntil)
-                        {
-                            try
-                            {
-                                deadline ??= new FrameDeadlineWaiter(signal);
-                                deadline.WaitUntil(holdUntil);
-                                continue; // The latest packet may have changed during the hold.
-                            }
-                            catch (System.ComponentModel.Win32Exception) { sourceTimerUnavailable = true; }
-                        }
-                    }
                     if (!Slot()) continue;
                     DiagnosticBeforeFrameLatch?.Invoke();
                     using var frame = TakeLatest();
@@ -487,17 +469,9 @@ internal sealed class Direct3DHost : HwndHost
                     using var fresh = RefreshAfterAiStartup(featureCreations, frame.Duration);
                     if (fresh != null) gpu.Draw(fresh, Sharpness, Upscaler);
                     var shown = fresh ?? frame;
-                    var presented = new PresentedFrame(shown.Time, shown.Duration);
-                    if (Publish(presented))
-                    {
-                        lastSourceTime = shown.Time;
-                        lastSourceArrival = consumedArrival;
-                        lastSourcePresentedAt = lastPresentedAt;
-
-                    }
+                    Publish(new PresentedFrame(shown.Time, shown.Duration));
                     continue;
                 }
-                lastSourceArrival = 0;
                 try { deadline ??= new FrameDeadlineWaiter(signal); } catch (System.ComponentModel.Win32Exception) { timingFailure = "Accurate frame timing unavailable"; continue; }
                 { // Pace distinct game frames for both automatic and forced-30 cadence.
                     if (!gpu.HasInterpolationFrame)
@@ -574,8 +548,10 @@ internal sealed class Direct3DHost : HwndHost
                     }
                     PrepareDraw();
                     bool intermediate = cadenceStep > 0 && cadenceStep < multiplier;
+                    long pair = gpu.InterpolationPairRevision;
                     PresentedFrame shown;
-                    if (intermediate) shown = gpu.RenderIntermediate(cadenceStep, multiplier, Sharpness, Upscaler);
+                    if (intermediate)
+                        shown = gpu.RenderIntermediate(cadenceStep, multiplier, Sharpness, Upscaler);
                     else
                     {
                         gpu.RenderCachedFrame(Sharpness, Upscaler);
@@ -584,7 +560,12 @@ internal sealed class Direct3DHost : HwndHost
                     while (Clock.Now < cadenceDue && Alive() && FrameGeneration == requested && Capped30Game == content30)
                         deadline.WaitUntil(cadenceDue);
                     if (!Alive() || FrameGeneration != requested || Capped30Game != content30) continue;
-                    Publish(shown);
+                    // Do not jump back to the older source after a generated phase has already been shown.
+                    if (FrameGenerationPolicy.ShouldPresentPhase(shown.Kind, intermediate, pair, lastGeneratedPair))
+                    {
+                        if (Publish(shown) && shown.Kind == PresentationKind.Interpolated)
+                            lastGeneratedPair = pair;
+                    }
                     cadenceStep = intermediate ? cadenceStep + 1 : 0;
                     AdvanceCadence(1); continue;
                 }
@@ -604,15 +585,31 @@ internal sealed class Direct3DHost : HwndHost
             Interlocked.Decrement(ref liveRenderers); completed.TrySetResult();
         }
     }
+    bool IsPreviewShortcut(int message, nint key)
+    {
+        const int keyDown = 0x100, f11 = 122, escape = 27;
+        return !stopping && message == keyDown && (key == f11 || (isFullscreen && key == escape));
+    }
+
     protected override nint WndProc(nint hwnd, int msg, nint wParam, nint lParam, ref bool handled)
     {
-        if (!stopping && msg == 0x100 && (wParam == 122 || (paceSourceFrames && wParam == 27))) { handled = true; Dispatcher.BeginInvoke(() => { if (!stopping) ExitRequested?.Invoke(); }); }
-        if (msg == 0x201) SetFocus(hwnd);
+        if (IsPreviewShortcut(msg, wParam))
+        {
+            handled = true;
+            Dispatcher.BeginInvoke(() => { if (!stopping) ExitRequested?.Invoke(); });
+        }
+        const int leftButtonDown = 0x201;
+        if (msg == leftButtonDown) SetFocus(hwnd);
         return base.WndProc(hwnd, msg, wParam, lParam, ref handled);
     }
+
     protected override bool TranslateAcceleratorCore(ref MSG msg, ModifierKeys modifiers)
     {
-        if (!stopping && msg.message == 0x100 && (msg.wParam == 122 || (paceSourceFrames && msg.wParam == 27))) { ExitRequested?.Invoke(); return true; }
+        if (IsPreviewShortcut(msg.message, msg.wParam))
+        {
+            ExitRequested?.Invoke();
+            return true;
+        }
         return base.TranslateAcceleratorCore(ref msg, modifiers);
     }
     volatile bool releaseOnStop;

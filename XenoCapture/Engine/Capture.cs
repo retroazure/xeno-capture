@@ -31,7 +31,13 @@ internal sealed class Packet : IDisposable
     {
         int references = 1;
         public readonly byte[] Bytes;
-        public Storage(int length) { Bytes = ArrayPool<byte>.Shared.Rent(length); Interlocked.Increment(ref liveBuffers); }
+        readonly bool clearOnReturn;
+        public Storage(int length, bool clearOnReturn)
+        {
+            this.clearOnReturn = clearOnReturn;
+            Bytes = ArrayPool<byte>.Shared.Rent(length);
+            Interlocked.Increment(ref liveBuffers);
+        }
         public void AddRef()
         {
             int count = Volatile.Read(ref references);
@@ -44,7 +50,7 @@ internal sealed class Packet : IDisposable
         }
         public void Release()
         {
-            if (Interlocked.Decrement(ref references) == 0) { ArrayPool<byte>.Shared.Return(Bytes); Interlocked.Decrement(ref liveBuffers); }
+            if (Interlocked.Decrement(ref references) == 0) { ArrayPool<byte>.Shared.Return(Bytes, clearOnReturn); Interlocked.Decrement(ref liveBuffers); }
         }
     }
     static int liveBuffers;
@@ -61,10 +67,10 @@ internal sealed class Packet : IDisposable
     public bool Audio { get; }
     public int Width { get; }
     public int Height { get; }
-    public Packet(int length, bool audio = false, int width = 0, int height = 0, PixelLayout layout = PixelLayout.Bgr32)
+    public Packet(int length, bool audio = false, int width = 0, int height = 0, PixelLayout layout = PixelLayout.Bgr32, bool clearOnReturn = false)
     {
         if (length <= 0) throw new ArgumentOutOfRangeException(nameof(length));
-        storage = new(length); Layout = layout; Length = length; Audio = audio; Width = width; Height = height;
+        storage = new(length, clearOnReturn); Layout = layout; Length = length; Audio = audio; Width = width; Height = height;
     }
     Packet(Packet source)
     {
@@ -142,7 +148,7 @@ internal sealed class CaptureStream
     readonly CancellationTokenSource cancel = new();
     readonly TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     readonly Func<ICaptureBackend> createBackend;
-    readonly TimeSpan shutdownTimeout;
+    readonly TimeSpan shutdownTimeout = TimeSpan.FromSeconds(2);
     ICaptureBackend? backend;
     Task? worker;
     volatile bool stopping;
@@ -153,10 +159,16 @@ internal sealed class CaptureStream
     public int AudioRate { get; private set; }
     public int AudioChannels { get; private set; }
     public CaptureStream(CaptureDevice device, VideoMode? mode = null, bool nativeVideo = false)
-        : this(null, TimeSpan.FromSeconds(2))
-    { createBackend = () => new MediaCaptureBackend(device, mode, nativeVideo, step => Progress?.Invoke(step)); }
+    {
+        createBackend = () => new MediaCaptureBackend(device, mode, nativeVideo, step => Progress?.Invoke(step));
+    }
+
     internal CaptureStream(Func<ICaptureBackend>? factory, TimeSpan timeout)
-    { createBackend = factory ?? (() => throw new InvalidOperationException("No capture backend configured.")); shutdownTimeout = timeout; }
+    {
+        createBackend = factory ?? (() => throw new InvalidOperationException("No capture backend configured."));
+        shutdownTimeout = timeout;
+    }
+
     public Task Start()
     {
         lock (gate)
@@ -175,13 +187,25 @@ internal sealed class CaptureStream
         {
             usage = MediaFoundationUsage.Enter();
             using var scheduling = MultimediaScheduling.Enter("Capture");
-            apartment = new Apartment(); owned = createBackend(); lock (gate) backend = owned;
-            owned.Open(cancel.Token); cancel.Token.ThrowIfCancellationRequested();
-            Layout = owned.Layout; AudioRate = owned.AudioRate; AudioChannels = owned.AudioChannels; ready.TrySetResult();
+            apartment = new Apartment();
+            owned = createBackend();
+            lock (gate) backend = owned;
+
+            owned.Open(cancel.Token);
+            cancel.Token.ThrowIfCancellationRequested();
+            Layout = owned.Layout;
+            AudioRate = owned.AudioRate;
+            AudioChannels = owned.AudioChannels;
+            ready.TrySetResult();
+
             while (!stopping)
             {
-                using var packet = owned.Read(); if (stopping) break;
-                if (packet != null) { Layout = packet.Layout; Data?.Invoke(packet); }
+                using var packet = owned.Read();
+                if (stopping) break;
+                if (packet == null) continue;
+
+                Layout = packet.Layout;
+                Data?.Invoke(packet);
             }
         }
         catch (OperationCanceledException) when (stopping) { ready.TrySetCanceled(); }
@@ -198,11 +222,18 @@ internal sealed class CaptureStream
     public Task Stop() => stop.Run(StopCore);
     async Task StopCore()
     {
-        Task running; ICaptureBackend? owned;
+        Task running;
+        ICaptureBackend? owned;
         lock (gate)
         {
-            if (!stopping) { stopping = true; cancel.Cancel(); }
-            ready.TrySetCanceled(); owned = backend; running = worker ?? Task.CompletedTask;
+            if (!stopping)
+            {
+                stopping = true;
+                cancel.Cancel();
+            }
+            ready.TrySetCanceled();
+            owned = backend;
+            running = worker ?? Task.CompletedTask;
             if (worker == null) cancel.Dispose();
         }
         Task completion = owned?.RequiresExternalShutdown == true

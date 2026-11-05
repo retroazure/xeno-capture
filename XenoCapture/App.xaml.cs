@@ -15,7 +15,7 @@ public partial class App : Application
     // Preserve the diagnostic precedence when multiple modes are specified.
     static readonly string[] DiagnosticModes =
     [
-        "--card-test", "--theme-tests", "--ai-video-tests", "--capped-game-tests", "--capped-game-soak",
+        "--card-test", "--android-usb-tests", "--window-capture-tests", "--theme-tests", "--ai-video-tests", "--capped-game-tests", "--capped-game-soak",
         "--rtx-video-tests", "--framegen-soak", "--framegen-tests", "--upscaling-tests",
         "--scheduling-benchmark", "--render-benchmark", "--presentation-tests", "--shutdown-tests", "--self-test"
     ];
@@ -72,6 +72,8 @@ public partial class App : Application
             await (mode switch
             {
                 "--card-test" => RunCardDiagnosticAsync(cardName!, directory),
+                "--android-usb-tests" => AndroidUsbDiagnostics.Run(directory),
+                "--window-capture-tests" => WindowCaptureDiagnostics.Run(directory),
                 "--theme-tests" => XenoCapture.MainWindow.CheckAppearance(directory),
                 "--ai-video-tests" => AiVideoDiagnostics.Run(directory),
                 "--capped-game-tests" => CappedGameDiagnostics.Run(directory, 6),

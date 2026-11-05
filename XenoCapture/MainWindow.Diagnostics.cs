@@ -13,6 +13,7 @@ namespace XenoCapture;
 public partial class MainWindow
 {
     internal Exception? DiagnosticPreviewError {get;private set;}
+    internal bool DiagnosticDisablePreviewWarmup { get; set; }
     readonly TaskCompletionSource diagnosticClosed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     internal void DiagnosticPrepareInput(bool withAudio = false)
     {

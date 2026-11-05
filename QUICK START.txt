@@ -17,6 +17,19 @@ New recordings use the Xeno Capture folder in place of the old default folder.
 
 Appearance: use Light mode / Dark mode in the top bar. Xeno Capture saves your choice when you close the app. On first launch it imports settings from the previous app name if available.
 
+ANDROID OVER A USB DATA CABLE
+
+Connect one Android phone, unlock it, and enable USB debugging under
+Developer options. In Xeno Capture, open Input > Phone screen and select
+Play Android over USB. Approve the debugging request on the phone if shown.
+Leave Always allow from this computer unchecked for temporary approval.
+Android USB keeps the scrcpy helper off-screen while Xeno shows the preview.
+For live sound on Android 11 or newer, check Phone output before clicking
+Play. This routes the phone's sound to the Windows playback output.
+Use the Phone volume slider below the preview to adjust the mirroring volume.
+Disconnect in Xeno Capture when finished, then turn off USB debugging on
+the phone if you no longer need it. Keep the android folder beside the app.
+
 EXPERIMENTAL AI UPSCALING (preview only, off by default)
 Output > AI Video Super Resolution > enable the switch.
 Choose Auto, 720p, 1080p, 1440p or 4K processing, then Performance,
@@ -43,8 +56,11 @@ Generation adds one content frame of buffering. Motion checks preserve
 source frames on scene cuts and suppress interpolation when too much
 high-contrast motion cannot be matched.
 
-This update reuses loaded AI features on target changes, avoids duplicate
-inference on identical capture frames, and anchors pacing to input arrivals.
-It also keeps the loaded AI model between windowed and fullscreen playback.
+With frame generation off, the preview presents the latest available
+frame as soon as the display path is ready. For lower GPU use, choose
+Preview upscaling > Performance and leave AI Video Super Resolution off.
+
+AI preview reuses the loaded model when targets change and between windowed
+and fullscreen playback. Identical capture frames can reuse inference output.
 See AI PREVIEW AND PACING REVIEW.md for tests and remaining limits.
 Fast motion, HUD edges and scene changes can still show artifacts or repeats.

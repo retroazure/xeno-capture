@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>disable</ImplicitUsings>
@@ -14,11 +14,13 @@
     <RootNamespace>XenoCapture</RootNamespace>
     <PlatformTarget>x64</PlatformTarget>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>0.9.8</Version>
+    <Version>0.10.13</Version>
     <MinimumRuntimePatch>10.0.14</MinimumRuntimePatch>
-    <RuntimeFrameworkVersion Condition="'$(SelfContained)' != 'true' and '$(RuntimeFrameworkVersion)' == ''">$(MinimumRuntimePatch)</RuntimeFrameworkVersion>
     <Description>Native capture-card preview, upscaling and recording.</Description>
   </PropertyGroup>
+  <ItemGroup Condition="'$(SelfContained)' != 'true' and '$(RuntimeFrameworkVersion)' == ''">
+    <FrameworkReference Update="Microsoft.NETCore.App;Microsoft.WindowsDesktop.App" RuntimeFrameworkVersion="$(MinimumRuntimePatch)" />
+  </ItemGroup>
   <ItemGroup>
     <Resource Include="UI\Xeno.ico" />
     <EmbeddedResource Include="ThirdParty\NIS\NIS.cso" LogicalName="XenoCapture.NIS.Shader" />
@@ -43,7 +45,7 @@
     <Content Include="ThirdParty\RTXVideo\NVIDIA_RTX_Video_SDK_License.pdf" Link="gpu\NVIDIA_RTX_Video_SDK_License.pdf" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
   <Target Name="RequireServicedRuntime" AfterTargets="ProcessFrameworkReferences">
-    <Error Condition="'%(RuntimeFramework.Version)' != '' and $([MSBuild]::VersionLessThan('%(RuntimeFramework.Version)', '$(MinimumRuntimePatch)'))"
+    <Error Condition="('%(RuntimeFramework.FrameworkName)' == 'Microsoft.NETCore.App' or '%(RuntimeFramework.FrameworkName)' == 'Microsoft.WindowsDesktop.App') and '%(RuntimeFramework.Version)' != '' and $([MSBuild]::VersionLessThan('%(RuntimeFramework.Version)', '$(MinimumRuntimePatch)'))"
            Text="Xeno Capture requires .NET $(MinimumRuntimePatch) or later. Update the .NET SDK or remove the older runtime override." />
   </Target>
   <Target Name="EmbedGpuBridgeHash" BeforeTargets="GetAssemblyAttributes">

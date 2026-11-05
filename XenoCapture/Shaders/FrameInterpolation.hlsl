@@ -189,6 +189,59 @@ bool RecoverConsistentWarp(float2 uv, float2 motion, out float3 result) {
     return true;
 }
 
+bool WarpsAgree(float4 forward, float4 backward) {
+    float2 disagreement = (forward.xy + backward.xy) * SourceSize;
+    return dot(disagreement, disagreement) <= 2.25;
+}
+
+bool MovedAway(Texture2D<float4> reverseField, Texture2D<float4> otherImage,
+               float2 uv, float3 color, float4 flow, float phase) {
+    float2 displacement = phase * flow.xy * SourceSize;
+    if (dot(displacement, displacement) < 2.25) return false;
+
+    float2 match = uv + flow.xy;
+    float4 reverse = FlowAt(reverseField, match);
+    return ValidWarp(uv, uv, match, flow, reverse, 0)
+        && Max3(abs(color - otherImage.SampleLevel(LinearClamp, match, 0).rgb)) < .045;
+}
+
+bool RecoverStaticBackground(float2 uv, float3 a, float3 b, out float3 color) {
+    bool fromA = Alpha <= .5;
+    float4 moving = fromA ? FlowAt(Forward, uv) : FlowAt(Backward, uv);
+    float phase = fromA ? Alpha : 1 - Alpha;
+    color = 0;
+    bool moved = fromA ? MovedAway(Backward, B, uv, a, moving, phase)
+                       : MovedAway(Forward, A, uv, b, moving, phase);
+    if (!moved) return false;
+
+    // Check the position the moving surface would have come from at this phase.
+    // If both frames show the same background there, the motion has exposed this pixel.
+    float2 anchor = uv - moving.xy * phase;
+    float2 border = .5 / SourceSize;
+    if (any(anchor < border) || any(anchor > 1 - border)) return false;
+
+    float3 anchorA = A.SampleLevel(LinearClamp, anchor, 0).rgb;
+    float3 anchorB = B.SampleLevel(LinearClamp, anchor, 0).rgb;
+    if (Max3(abs(anchorA - anchorB)) > .02) return false;
+    float2 f = FlowAt(Forward, anchor).xy * SourceSize;
+    float2 r = FlowAt(Backward, anchor).xy * SourceSize;
+    if (max(dot(f, f), dot(r, r)) > .25) {
+        // Flow can bleed into a static edge. Require a matching image patch
+        // along that edge before using the background in this case.
+        float2 direction = normalize(moving.xy * SourceSize);
+        float2 offset = float2(-direction.y, direction.x) / SourceSize;
+        const float tolerance = 2.0 / 255.0;
+        if (Max3(abs(anchorA - anchorB)) > tolerance) return false;
+        float3 plusA = A.SampleLevel(LinearClamp, anchor + offset, 0).rgb;
+        float3 plusB = B.SampleLevel(LinearClamp, anchor + offset, 0).rgb;
+        float3 minusA = A.SampleLevel(LinearClamp, anchor - offset, 0).rgb;
+        float3 minusB = B.SampleLevel(LinearClamp, anchor - offset, 0).rgb;
+        if (max(Max3(abs(plusA - plusB)), Max3(abs(minusA - minusB))) > tolerance) return false;
+    }
+    color = fromA ? b : a;
+    return true;
+}
+
 groupshared uint GeneratedCounts[8];
 void SynthesizeFrame(uint3 id, uint thread, bool slowMotion) {
     if (thread < 8) GeneratedCounts[thread]=0;
@@ -221,7 +274,7 @@ void SynthesizeFrame(uint3 id, uint thread, bool slowMotion) {
                 if (validA) validA = Max3(abs(a - B.SampleLevel(LinearClamp, matchB, 0).rgb)) < .085;
                 if (validB) validB = Max3(abs(bColor - A.SampleLevel(LinearClamp, matchA, 0).rgb)) < .085;
                 if (validA && validB) {
-                    if (Max3(abs(a - bColor)) < .085) {
+                    if (WarpsAgree(f, b) && Max3(abs(a - bColor)) < .085) {
                         result = lerp(a, bColor, Alpha);
                         matchedWarp = true;
                     }
@@ -251,7 +304,7 @@ void SynthesizeFrame(uint3 id, uint thread, bool slowMotion) {
             float4 reverse = Forward.SampleLevel(LinearClamp,matchA,0);
             bool validA = ValidWarp(uv,pa,matchB,f,opposite,Alpha);
             bool validB = ValidWarp(uv,pb,matchA,b,reverse,1-Alpha);
-            if (max(f.w,b.w)<.2 && validA && validB) {
+            if (max(f.w,b.w)<.2 && validA && validB && WarpsAgree(f, b)) {
                 float3 a = A.SampleLevel(LinearClamp,pa,0).rgb, bColor = B.SampleLevel(LinearClamp,pb,0).rgb;
                 if (Max3(abs(a-bColor)) < .10) { result = lerp(a,bColor,Alpha); matchedWarp = true; }
             }
@@ -287,6 +340,13 @@ void SynthesizeFrame(uint3 id, uint thread, bool slowMotion) {
             if(safe && !StableEdge(uv,original,next)) {
                 float3 a=A.SampleLevel(LinearClamp,pa,0).rgb,b=B.SampleLevel(LinearClamp,pb,0).rgb;
                 if(Max3(abs(a-b))<.05) { result=lerp(a,b,Alpha); matchedWarp = true; }
+            }
+        }
+        if (!matchedWarp && (Flags & 2) != 0 && (Flags & 16) == 0 && difference > .12) {
+            float3 background;
+            if (RecoverStaticBackground(uv, original, next, background)) {
+                result = background;
+                matchedWarp = true;
             }
         }
         result=saturate(result);Output0[id.xy]=float4(result,1);

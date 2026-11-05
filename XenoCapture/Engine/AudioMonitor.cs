@@ -11,7 +11,6 @@ namespace XenoCapture.Engine;
 internal sealed class AudioMonitor : IDisposable
 {
     [StructLayout(LayoutKind.Sequential, Pack = 2)] struct Format { public ushort Tag, Channels; public uint Rate, BytesPerSecond; public ushort Align, Bits, Extra; }
-    [DllImport("ole32.dll")] static extern int CoCreateInstance(ref Guid clsid, nint outer, uint context, ref Guid iid, out nint instance);
     readonly ConcurrentQueue<Packet> queue = new();
     readonly AutoResetEvent audioEvent = new(false);
     readonly object gate = new();
@@ -62,10 +61,21 @@ internal sealed class AudioMonitor : IDisposable
     }
     unsafe void RunCore(TaskCompletionSource ready)
     {
-        Guid clsid = new("bcde0395-e52f-467c-8e3d-c4579291692e"), enumId = new("a95664d2-9614-4f35-a746-de8db63617e6"), clientId = new("1cb9ad4c-dbfa-4c32-b178-c2f568a703b2"), renderId = new("f294acfc-3146-4483-a7bf-addca7c260e2");
-        Native.Hr(CoCreateInstance(ref clsid, 0, 1, ref enumId, out var ep)); using var enumerator = new Com(ep);
-        nint dp; Native.Hr(((delegate* unmanaged[Stdcall]<nint, int, int, nint*, int>)enumerator.Slot(4))(ep, 0, 0, &dp)); using var device = new Com(dp);
-        nint cp; Native.Hr(((delegate* unmanaged[Stdcall]<nint, Guid*, uint, nint, nint*, int>)device.Slot(3))(dp, &clientId, 23, 0, &cp)); using var client = new Com(cp);
+        Guid clientId = new("1cb9ad4c-dbfa-4c32-b178-c2f568a703b2");
+        Guid renderId = new("f294acfc-3146-4483-a7bf-addca7c260e2");
+        Native.Hr(Native.CreateAudioEndpointEnumerator(out nint endpointPointer));
+        using var enumerator = new Com(endpointPointer);
+
+        const int render = 0, console = 0;
+        nint devicePointer;
+        Native.Hr(((delegate* unmanaged[Stdcall]<nint, int, int, nint*, int>)enumerator.Slot(4))
+            (endpointPointer, render, console, &devicePointer));
+        using var device = new Com(devicePointer);
+
+        nint cp;
+        Native.Hr(((delegate* unmanaged[Stdcall]<nint, Guid*, uint, nint, nint*, int>)device.Slot(3))
+            (devicePointer, &clientId, 23, 0, &cp));
+        using var client = new Com(cp);
         var format = new Format { Tag = 1, Channels = (ushort)channels, Rate = (uint)rate, BytesPerSecond = (uint)(rate * channels * 2), Align = (ushort)(channels * 2), Bits = 16 };
         const uint eventCallback = 0x40000, autoConvertPcm = 0x80000000, resampleQuality = 0x08000000;
         Native.Hr(((delegate* unmanaged[Stdcall]<nint, int, uint, long, long, Format*, nint, int>)client.Slot(3))(cp, 0, eventCallback | autoConvertPcm | resampleQuality, 0, 0, &format, 0));

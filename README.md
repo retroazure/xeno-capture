@@ -8,7 +8,7 @@ Xeno Capture is an open-source Windows x64 app for viewing and recording HDMI vi
 
 ## Scope
 
-The supported workflow starts with an unprotected SDR HDMI signal and ends with local preview, audio monitoring, or files. A 1080p60 signal with stereo audio is a good starting point for console capture. Console rendering and controller input stay on the console. Game emulation, live streaming, HDR, VRR, and protected HDMI capture are outside the app's scope.
+The HDMI workflow starts with an unprotected SDR signal and ends with local preview, audio monitoring, or files. Android phones can also be previewed over a USB data cable. A 1080p60 signal with stereo audio is a good starting point for console capture. Console rendering and controller input stay on the console. Game emulation, live streaming, HDR, VRR, and protected HDMI capture are outside the app's scope.
 
 Xeno Capture sees the finished video frames from the capture card. The capture feed supplies no game-engine motion vectors, depth, or separate HUD layers. The optional filters estimate motion and detail from those finished frames, and the actual results depend on the source, GPU, capture card, and display.
 
@@ -34,9 +34,9 @@ Loaded AI features are reused when target dimensions change. Byte-identical reta
 
 Choose **Output → Frame Generation → Adaptive 2×, 3× or 4×**. Supported NVIDIA GPUs use their hardware optical-flow engine; other supported configurations retain the software motion fallback. The app automatically detects repeated images in a 60 FPS feed from a 30 FPS game. Its targets are then 60, 90 and 120 FPS. For 60 FPS content, the corresponding targets are 120, 180 and 240 FPS. Leave **Force 30 FPS game cadence** unchecked for automatic detection; the saved override is available when needed. The screen must support the selected target rate. Input is limited to 1080p for generation.
 
-Frame generation adds one content frame of buffering. For 30 FPS games, NVIDIA optical flow checks whether a motion estimate points to matching pixels in both source frames. The preview can use a single verified warp at an occlusion or hold pixels from the nearer source when the match is uncertain. The hardware path also checks an individual flow vector at rejected high-contrast boundaries in faster captures. It uses the recovered motion only when both endpoints agree. All generation modes hold the previous source frame until a scene cut is due. The shader checks that motion agrees across both endpoints and rejects frame pairs with too much unsupported high-contrast motion. Complex motion can still produce artifacts or repeats. The extra frames can make motion look smoother. Controller response still follows the console and capture path. **Off** shows the latest capture without interpolation. In fullscreen, early source frames can wait up to 2 ms to smooth irregular delivery. Late frames and timing discontinuities go straight to the next available presentation slot. The FPS display separates accepted presentations, frames containing synthesized pixels, and capture input frames. These are software measurements, not physical display scanout or button-to-screen latency.
+Frame generation adds one content frame of buffering. For 30 FPS games, NVIDIA optical flow checks whether a motion estimate points to matching pixels in both source frames. The preview can use a single verified warp at an occlusion or hold pixels from the nearer source when the match is uncertain. The hardware path also checks an individual flow vector at rejected high-contrast boundaries in faster captures. It uses the recovered motion only when both endpoints agree. All generation modes hold the previous source frame until a scene cut is due. The shader checks that motion agrees across both endpoints and rejects frame pairs with too much unsupported high-contrast motion. Complex motion can still produce artifacts or repeats. The extra frames can make motion look smoother. Controller response still follows the console and capture path. **Off** shows the latest captured frame at the next available presentation slot. The same path is used when frame generation is unavailable. The FPS display separates accepted presentations, frames containing synthesized pixels, and capture input frames. These are software measurements, not physical display scanout or button-to-screen latency.
 
-**Preview Upscaling → RTX Video Super Resolution** runs the same model when enlarging the preview. **AI Active** appears after successful model evaluation. This mode requires a compatible NVIDIA RTX GPU, driver, and matching GPU files. First use initializes the model and can pause output temporarily. **Normal** uses NVIDIA Image Scaling and **Standard** uses fast scaling. Both are non-AI options. If RTX Video is unavailable, the app falls back to Normal, then Standard.
+**Preview Upscaling → RTX Video Super Resolution** runs the same model when enlarging the preview. **AI Active** appears after successful model evaluation. This mode requires a compatible NVIDIA RTX GPU, driver, and matching GPU files. First use initializes the model and can pause output temporarily. **Normal** uses NVIDIA Image Scaling and **Standard** uses fast scaling. **Performance** uses basic scaling and skips preview sharpening and fullscreen edge smoothing to reduce GPU work. The separate AI Video Super Resolution switch takes priority when enabled. If RTX Video is unavailable, the app falls back to Normal, then Standard.
 
 Keep the matching **gpu** folder beside **XenoCapture.exe**. Xeno Capture verifies the bridge and NVIDIA model before loading them and uses the existing preview fallbacks if verification fails. It contains the compiled bridge, NVIDIA's verified model DLL and its license. No separate .NET installation is needed for the standalone package. Frame generation and enhancement apply to preview; recording retains its own source-rate and resolution settings.
 
@@ -54,6 +54,18 @@ Frame generation adapts its scheduling margin to the measured GPU work and skips
 Start with a 1080p60 SDR signal and stereo audio from the console. On Switch 2, TV resolution, HDR and 120 Hz output are controlled under System Settings → Display. Use a wired headphone/speaker output if responsiveness matters; Bluetooth introduces its own audio delay.
 
 The generated test signal uses no camera or microphone. Its audio is a quiet 440 Hz tone and is only audible when audio playback is enabled.
+
+## Phone screens
+
+Open **Input → Phone screen** for Android USB mirroring.
+
+- **Android over USB.** Connect one Android phone with a USB data cable. Enable **USB debugging** under Android's **Developer options**, unlock the phone, and choose **Play Android over USB**. Approve the Android debugging prompt if shown. Leave **Always allow from this computer** unchecked for temporary approval. Check **Phone output** before starting to hear the phone during mirroring. Use **Disconnect** to end Xeno Capture's dedicated ADB session. The helper uses the computer's standard Android debugging identity, so Android may reuse a previous approval. To clear saved trust, use **Revoke USB debugging authorizations** on the phone. You can also turn USB debugging off when finished. [Android USB debugging guide](https://developer.android.com/studio/run/device#setting-up).
+
+Android USB preview requires Windows 10 version 2004 or later, Windows Graphics Capture, and a working Windows ADB driver. Xeno Capture starts a dedicated local ADB session and renders the scrcpy helper window off-screen with phone controls and clipboard sync disabled. Xeno Capture previews that window in memory. Phone mirroring is a live preview. Protected content can appear blank. USB debugging grants the approved computer broader access than video preview. [scrcpy release](https://github.com/Genymobile/scrcpy/releases/tag/v5.0.1)
+
+Audio starts off each session. **Phone output** is available on Android 11 or newer and sends the device's sound over USB to the Windows playback output. Adjust **Phone volume** in the preview to set the mirroring volume. The slider shows the current Windows session volume once phone audio starts. Video can continue when Android audio capture is unavailable. [scrcpy audio forwarding](https://github.com/Genymobile/scrcpy/blob/v5.0.1/doc/audio.md)
+
+The Android helper uses zero added video buffering. With frame generation off, both views display the latest available phone frame as soon as the presentation slot is ready. [scrcpy video buffering](https://github.com/Genymobile/scrcpy/blob/v5.0.1/doc/video.md#buffering)
 
 ## Included features
 
@@ -78,12 +90,14 @@ Video is SDR and 8-bit, with one video input and one mono or stereo audio input.
 
 ## Build and diagnostics
 
-Install .NET SDK 10.0.403 or later and use `./build.ps1 -Standalone`; the framework-dependent option is `./build.ps1` and requires .NET Desktop Runtime 10.0.14 or later. Copy the executable together with its gpu folder. There are no external application NuGet packages. Publishing may download official .NET runtime packs.
+Install .NET SDK 10.0.403 or later and use `./build.ps1 -Standalone`; the framework-dependent option is `./build.ps1` and requires .NET Desktop Runtime 10.0.14 or later. Copy the executable together with its gpu folder. The .NET SDK may download official Windows SDK and .NET runtime packs.
 
 For a source build, use MSVC and the Windows SDK versions configured in `tools/Build-GpuBridge.ps1` and obtain the official [NVIDIA RTX Video SDK v1.1.0](https://developer.nvidia.com/rtx-video-sdk). Before running `build.ps1`, prepare the native files expected by the project:
 
 1. Run `./tools/Build-GpuBridge.ps1 -SdkRoot <sdk-directory> -OutputDirectory ./XenoCapture/Native/bin` from the project root to build the bridge. The bridge links the SDK's NGX library and uses NVIDIA's MIT-licensed Optical Flow headers. The NVIDIA driver supplies `nvofapi64.dll`.
 2. Place the SDK's `bin/Windows/x64/rel/nvngx_vsr.dll` and `NVIDIA_RTX_Video_SDK_License.pdf` from the SDK root in `XenoCapture/ThirdParty/RTXVideo`.
+
+For Android USB support, download the [official scrcpy 5.0.1 Windows x64 ZIP](https://github.com/Genymobile/scrcpy/releases/tag/v5.0.1) and pass its path to `./build.ps1 -Standalone -AndroidUsbArchive <zip-path>`. The script verifies the ZIP before staging the `android` folder. Keep that folder next to the executable. Xeno Capture checks its files before launching the helper.
 
 Use `tools/Build-FrameShaders.ps1` to rebuild preview and compute bytecode after shader edits.
 
@@ -91,6 +105,7 @@ Synthetic diagnostics do not open a camera/capture card or record a microphone:
 
 - `XenoCapture.exe --ai-video-tests <folder>`: explicit output sizes, quality, exact-frame cache, native/range/fallback, recording independence and six AI fullscreen round trips.
 - `XenoCapture.exe --self-test <folder>`: complete encoding, audio, GPU, UI and lifecycle suite.
+- `XenoCapture.exe --window-capture-tests <folder>`: synthetic preview window, pixel checks, resizing, disconnect and source closure.
 - `XenoCapture.exe --framegen-tests <folder>`: pixel oracles, hardware/software paths, cadence and 2×/3×/4× UI checks.
 - `XenoCapture.exe --capped-game-soak <folder>`: automatic/forced 30 FPS pacing and 20 fullscreen round trips.
 - `XenoCapture.exe --rtx-video-tests <folder>`: model-versus-bicubic pixel comparison, RGB/NV12 range, 1440p/4K, fallback and combined generation.

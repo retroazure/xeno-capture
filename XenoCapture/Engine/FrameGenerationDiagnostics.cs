@@ -67,6 +67,7 @@ internal static class FrameGenerationDiagnostics
             Require(info.Kind == PresentationKind.Interpolated, "No motion-interpolated frame was rendered.");
             double generatedError = Error(middle, expected.Bytes), repeatError = Error(first.Bytes, expected.Bytes);
             checks["midpointMeanAbsoluteError"] = generatedError; checks["repeatedFrameMeanAbsoluteError"] = repeatError;
+            checks["translationUnmatchedHighContrastFraction"] = renderer.UnmatchedHighContrastFraction;
             Require(generatedError < repeatError * .65, "The generated frame did not approach the known midpoint image.");
             UpscalingDiagnostics.SavePng(Path.Combine(folder, "previous.png"), first.Bytes, 640, 360);
             UpscalingDiagnostics.SavePng(Path.Combine(folder, "generated.png"), middle, 640, 360);
@@ -139,6 +140,12 @@ internal static class FrameGenerationDiagnostics
             Require(previous == 343333, "The fractional schedule changed the source frame boundary.");
         }
         Require(!FrameGenerationPolicy.CanGenerate(166667,240,1920,1080,5) && FrameGenerationPolicy.Multiplier((FrameGenerationMode)99) == 1, "Invalid factors were accepted.");
+        Require(FrameGenerationPolicy.ShouldPresentPhase(PresentationKind.Interpolated, true, 10, 0)
+            && !FrameGenerationPolicy.ShouldPresentPhase(PresentationKind.Repeated, true, 10, 10)
+            && FrameGenerationPolicy.ShouldPresentPhase(PresentationKind.Source, false, 10, 10)
+            && FrameGenerationPolicy.ShouldPresentPhase(PresentationKind.Repeated, true, 11, 10),
+            "A rejected late phase could rewind the visible frame or suppress a new pair.");
+        checks["latePhaseDoesNotRewind"] = "pass";
         using (var renderer = new D3DPreview(0,640,360) { DisableFrameBudgetForDiagnostics = true })
         using (var a = Pattern(0)) using (var b = Pattern(12))
         {

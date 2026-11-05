@@ -5,7 +5,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 
 namespace XenoCapture.Engine;
-internal enum PreviewUpscaler { Standard, Enhanced, RtxVideo }
+internal enum PreviewUpscaler { Standard, Enhanced, RtxVideo, Performance }
 
 internal sealed unsafe partial class D3DPreview
 {

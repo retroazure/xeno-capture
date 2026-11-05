@@ -60,6 +60,28 @@ internal static unsafe class Native
     [DllImport("mfreadwrite.dll", CharSet = CharSet.Unicode, ExactSpelling = true)] static extern int MFCreateSourceReaderFromURL(string url, nint attributes, out nint reader);
     [DllImport("ole32.dll")] public static extern int CoInitializeEx(nint reserved, uint model);
     [DllImport("ole32.dll")] public static extern void CoUninitialize();
+
+    [DllImport("ole32.dll"), DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    static extern int CoCreateInstance(ref Guid clsid, nint outer, uint context, ref Guid iid, out nint instance);
+
+    internal static int CreateAudioEndpointEnumerator(out nint instance)
+    {
+        Guid deviceEnumerator = new("bcde0395-e52f-467c-8e3d-c4579291692e");
+        Guid interfaceId = new("a95664d2-9614-4f35-a746-de8db63617e6");
+        const uint inProcessServer = 1;
+        return CoCreateInstance(ref deviceEnumerator, 0, inProcessServer, ref interfaceId, out instance);
+    }
+
+    [DllImport("d3d11.dll", ExactSpelling = true), DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    static extern int D3D11CreateDevice(nint adapter, uint driver, nint software, uint flags, nint levels,
+        uint levelCount, uint sdk, out nint device, nint featureLevel, out nint context);
+
+    internal static void CreateD3D11Device(out nint device, out nint context)
+    {
+        const uint hardware = 1, bgraSupport = 0x20, sdkVersion = 7;
+        Hr(D3D11CreateDevice(0, hardware, 0, bgraSupport, 0, 0, sdkVersion, out device, 0, out context));
+    }
+
     public static void Hr(int hr) { if (hr < 0) Marshal.ThrowExceptionForHR(hr); }
     public static Com Attributes() { Hr(MFCreateAttributes(out var p, 8)); return new(p); }
     public static Com Type() { Hr(MFCreateMediaType(out var p)); return new(p); }

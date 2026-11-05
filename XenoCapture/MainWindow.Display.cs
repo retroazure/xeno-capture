@@ -1,3 +1,9 @@
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Input;
+using System.Windows.Media;
+using XenoCapture.Engine;
+using XenoCapture.UI;
 using System;
 using System.Linq;
 using System.Windows;
@@ -68,4 +74,90 @@ public partial class MainWindow
         if (fullscreenPreview != null) fullscreenPreview.EdgeSmoothing = FullscreenEdgeSmoothing.IsChecked == true;
         if (IsLoaded) SaveSettings();
     }
+
+    async void Fullscreen(object sender, RoutedEventArgs e) => await RunUi(ToggleFullscreen);
+    Task ToggleFullscreen() => ToggleFullscreenOnDisplay(discoverHardware ? ResolveFullscreenBounds : null);
+
+    async Task ToggleFullscreenOnDisplay(Func<System.Drawing.Rectangle>? displayBounds)
+    {
+        if (fullscreenTransition) return;
+        fullscreenTransition = true;
+        try
+        {
+            if (fullscreen != null) { await fullscreen.CloseAsync(animate: MotionEnabled); return; }
+            if (!Connected || !sessions.Active || closing || Interlocked.Read(ref lastFrameAt) == 0) return;
+            PlayCue(InterfaceCue.Tap);
+            int session = sessions.Generation;
+            await embeddedPreview.SuspendAsync();
+            if (!sessions.IsCurrent(session) || closing || fullscreen != null) return;
+            VideoHost.Visibility = Visibility.Collapsed;
+            bool animateEntry = MotionEnabled;
+            var host = NewPreview(isFullscreen: true, animateFullscreenEntry: animateEntry);
+            host.Active = true;
+            fullscreenPreview = host;
+            activePreview = host;
+            bool resumed = false;
+            void ResumeEmbedded()
+            {
+                if (resumed || !sessions.IsCurrent(session) || closing) return;
+                resumed = true;
+                VideoHost.Visibility = Visibility.Visible;
+                embeddedPreview.Active = true;
+                activePreview = embeddedPreview;
+                lock (frameGate) { if (latest != null) embeddedPreview.Submit(latest); }
+            }
+
+            async Task ResumeAtLanding(Task skipWait)
+            {
+                if (!sessions.IsCurrent(session) || closing) return;
+                var embedded = embeddedPreview;
+                var firstFrame = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                void Presented(PresentedFrame _) => firstFrame.TrySetResult();
+                embedded.FramePresented += Presented;
+                try
+                {
+                    ResumeEmbedded();
+                    // The landing window covers the destination until the new swap chain draws.
+                    await Task.WhenAny(firstFrame.Task, skipWait, Task.Delay(250));
+                }
+                finally { embedded.FramePresented -= Presented; }
+            }
+
+            var playWindow = new PreviewWindow(host, animateEntry, displayBounds, () => MotionEnabled, EmbeddedPreviewBounds, ResumeAtLanding)
+            {
+                Title = "Xeno Capture — Fullscreen", Background = Brushes.Black, WindowStyle = WindowStyle.None,
+                ResizeMode = ResizeMode.NoResize, Width = 640, Height = 360, ShowActivated = discoverHardware,
+                ShowInTaskbar = false, Owner = this
+            };
+            fullscreen = playWindow;
+            playWindow.PreviewKeyDown += async (_, e) =>
+            {
+                if (e.Key is Key.Escape or Key.F11) { e.Handled = true; await RunUi(ToggleFullscreen); }
+            };
+            playWindow.Closed += (_, _) =>
+            {
+                if (!ReferenceEquals(fullscreen, playWindow)) return;
+                fullscreenPreview = null; fullscreen = null;
+                ResumeEmbedded();
+            };
+            try { playWindow.Show(); lock (frameGate) { if (latest != null) host.Submit(latest); } }
+            catch
+            {
+                try { await playWindow.CloseAsync(animate: false); }
+                finally
+                {
+                    if (ReferenceEquals(fullscreen, playWindow))
+                    {
+                        fullscreen = null; fullscreenPreview = null;
+                        await host.StopAsync();
+                        host.Dispose();
+                        ResumeEmbedded();
+                    }
+                }
+                throw;
+            }
+        }
+        finally { fullscreenTransition = false; }
+    }
+    async void OnKeyDown(object sender, System.Windows.Input.KeyEventArgs e) { if (e.Key == Key.F11) { e.Handled = true; await RunUi(ToggleFullscreen); } }
 }

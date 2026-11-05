@@ -23,8 +23,6 @@ internal sealed unsafe partial class D3DPreview : IDisposable
     [StructLayout(LayoutKind.Sequential)] struct SamplerDesc
     { public uint Filter, U, V, W; public float Bias; public uint Anisotropy, Comparison; public float R, G, B, A, MinLod, MaxLod; }
     [StructLayout(LayoutKind.Sequential)] struct Viewport { public float X, Y, Width, Height, MinDepth, MaxDepth; }
-    [DllImport("d3d11.dll", ExactSpelling = true)] static extern int D3D11CreateDevice(nint adapter, uint driver, nint module, uint flags, nint levels, uint levelCount, uint sdk, nint* device, uint* level, nint* context);
-
     [DllImport("kernel32.dll", SetLastError = true)] static extern uint WaitForMultipleObjects(uint count, nint* handles, int waitAll, uint milliseconds);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(nint handle);
     Com device = null!, context = null!;
@@ -52,16 +50,16 @@ internal sealed unsafe partial class D3DPreview : IDisposable
     internal bool DiagnosticDisableProcessedCache { get; set; }
     internal bool RetainFullscreenOutput { get; set; }
     internal bool CanRedrawFullscreenMotion => fullscreenMotionOutput.HasValue;
-    public D3DPreview(nint hwnd, int width, int height)
+    public D3DPreview(nint hwnd, int width, int height, bool deferTarget = false)
     {
         this.width = Math.Max(1, width); this.height = Math.Max(1, height);
         try
         {
-            nint dp, cp; uint level;
-            Native.Hr(D3D11CreateDevice(0, 1, 0, 0x20, 0, 0, 7, &dp, &level, &cp));
-            device = new(dp); context = new(cp);
+            Native.CreateD3D11Device(out nint devicePointer, out nint contextPointer);
+            device = new(devicePointer);
+            context = new(contextPointer);
             if (hwnd != 0) AttachWindow(hwnd, width, height);
-            else CreateTarget();
+            else if (!deferTarget) CreateTarget();
             // Cache embedded bytecode, while each device owns its GPU shaders.
             vertexShader = Shader(VertexBytecode.Value, 12); pixelShader = Shader(PixelBytecode.Value, 15);
             var sd = new SamplerDesc { Filter = 0x15, U = 3, V = 3, W = 3, Comparison = 1, MaxLod = float.MaxValue };
@@ -216,13 +214,15 @@ internal sealed unsafe partial class D3DPreview : IDisposable
     public void Draw(Packet frame, double sharpness, PreviewUpscaler upscaler = PreviewUpscaler.Standard)
     {
         long start = Stopwatch.GetTimestamp();
-        bool enhanced = AiVideo.Enabled || (upscaler != PreviewUpscaler.Standard && width > frame.Width && height > frame.Height);
+        bool enhanced = AiVideo.Enabled || ((upscaler is PreviewUpscaler.Enhanced or PreviewUpscaler.RtxVideo) &&
+            width > frame.Width && height > frame.Height);
         if (!enhanced || DiagnosticDisableProcessedCache) ClearAiInputCache();
         var source = enhanced && !DiagnosticDisableProcessedCache ? UploadProcessedFrame(frame) : UploadFrame(frame);
         RenderSource(source, sharpness, upscaler);
         LastUploadDrawMs = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
     }
-    readonly record struct PreparedOutput(Com Color, Com? Chroma, ShaderParameters Parameters, int SourceWidth, int SourceHeight, bool AiResampling);
+    readonly record struct PreparedOutput(Com Color, Com? Chroma, ShaderParameters Parameters, int SourceWidth,
+        int SourceHeight, bool AiResampling, bool UsePreviewFilters);
     Viewport FittedViewport(int sourceWidth, int sourceHeight, Rectangle? clip = null)
     {
         var area = clip ?? new Rectangle(0, 0, width, height);
@@ -240,9 +240,11 @@ internal sealed unsafe partial class D3DPreview : IDisposable
         fullscreenMotionOutput = null;
         var viewport = FittedViewport(source.Width, source.Height);
         Com display = source.Color; Com? displayChroma = source.Chroma;
-        var parameters = new ShaderParameters(source.Width, source.Height, (float)sharpness, source.Layout == PixelLayout.Nv12 ? 1 : 0, source.FullRange ? 1 : 0, source.Bt601 ? 1 : 0);
+        var ai = AiVideoSettings.Validate(AiVideo);
+        bool usePreviewFilters = upscaler != PreviewUpscaler.Performance || ai.Enabled;
+        var parameters = new ShaderParameters(source.Width, source.Height, usePreviewFilters ? (float)sharpness : 0,
+            source.Layout == PixelLayout.Nv12 ? 1 : 0, source.FullRange ? 1 : 0, source.Bt601 ? 1 : 0);
         UsedEnhancedUpscaling = false; RtxVideoRequested = false;AiVideoActive=false;AiVideoFallbackReason=null;
-        var ai=AiVideoSettings.Validate(AiVideo);
         if(!ai.Enabled)AiVideoStatus="Off";
         if (upscaler != previousUpscaler)
         {
@@ -274,10 +276,11 @@ internal sealed unsafe partial class D3DPreview : IDisposable
         else if (!ai.Enabled && !enlarge && upscaler == PreviewUpscaler.RtxVideo) { ResetRtxVideo(); UpscalingFallbackReason = null; }
         if (!rtxRendered)
         {
-            if (upscaler == PreviewUpscaler.Standard || !enlarge)
+            bool basicScaling = upscaler is PreviewUpscaler.Standard or PreviewUpscaler.Performance;
+            if (basicScaling || !enlarge)
             {
                 if (nisShader != null) DisposeNis();
-                if (upscaler == PreviewUpscaler.Standard) { nisDisabled = false; if(!ai.Enabled)UpscalingFallbackReason = null; }
+                if (basicScaling) { nisDisabled = false; if(!ai.Enabled)UpscalingFallbackReason = null; }
             }
             else if (!nisDisabled)
             {
@@ -294,7 +297,8 @@ internal sealed unsafe partial class D3DPreview : IDisposable
                 }
             }
         }
-        var output = new PreparedOutput(display, displayChroma, parameters, source.Width, source.Height, rtxRendered || DiagnosticAiResampling);
+        var output = new PreparedOutput(display, displayChroma, parameters, source.Width, source.Height,
+            rtxRendered || DiagnosticAiResampling, usePreviewFilters);
         DrawPrepared(output, viewport);
         // The renderer owns these views until its next source draw or detach.
         if (RetainFullscreenOutput) fullscreenMotionOutput = output;
@@ -309,7 +313,7 @@ internal sealed unsafe partial class D3DPreview : IDisposable
     void DrawPrepared(PreparedOutput output, Viewport viewport, bool docking = false)
     {
         var parameters = output.Parameters;
-        if (EdgeSmoothing)
+        if (EdgeSmoothing && output.UsePreviewFilters)
         {
             // Use capture-pixel spacing even after a scaler has enlarged its stair steps.
             parameters = parameters with { EdgeStepX = .8f / output.SourceWidth, EdgeStepY = .8f / output.SourceHeight };

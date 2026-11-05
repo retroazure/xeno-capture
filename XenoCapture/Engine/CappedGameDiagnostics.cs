@@ -18,7 +18,8 @@ internal static class CappedGameDiagnostics
     {
         Directory.CreateDirectory(folder); var checks=await Task.Run(()=>RunGpu(folder));
         await File.WriteAllTextAsync(Path.Combine(folder,"gpu-results.json"),JsonSerializer.Serialize(checks,new JsonSerializerOptions { WriteIndented=true }));
-        foreach (var item in await RunUi(folder,cycles)) checks[item.Key]=item.Value;
+        if (Array.IndexOf(Environment.GetCommandLineArgs(), "--gpu-only") < 0)
+            foreach (var item in await RunUi(folder,cycles)) checks[item.Key]=item.Value;
         checks["result"]="PASS"; await File.WriteAllTextAsync(Path.Combine(folder,"results.json"),JsonSerializer.Serialize(checks,new JsonSerializerOptions { WriteIndented=true }));
     }
     internal static Dictionary<string,object> RunGpu(string folder)
@@ -91,6 +92,10 @@ internal static class CappedGameDiagnostics
         }
         checks["layeredMotionQuality"] = CheckLayeredMotion(folder, gamePeriod);
         checks["incompatibleMotionFallback"] = CheckIncompatibleMotion(gamePeriod);
+        checks["localizedOcclusion"] = new {
+            native = CheckLocalizedOcclusion(folder, capturePeriod, 60),
+            capped = CheckLocalizedOcclusion(folder, gamePeriod, 30)
+        };
         long correctionSum=0,lastClockError=0;
         for(int frameIndex=1;frameIndex<=216000;frameIndex++)
         {
@@ -116,11 +121,12 @@ internal static class CappedGameDiagnostics
         using var last = LayeredScene(1);
         first.Time = 1_000_000;
         last.Time = first.Time + period;
-        Require(renderer.PrepareInterpolation(first, period, true) && renderer.PrepareInterpolation(last, period, true),
-            "Layered motion failed to prepare.");
         var measurements = new List<object>();
         foreach (var (step, factor) in new[] { (1, 2), (1, 3), (2, 3), (1, 4), (3, 4) })
         {
+            renderer.ResetInterpolation();
+            Require(renderer.PrepareInterpolation(first, period, true) && renderer.PrepareInterpolation(last, period, true),
+                "Layered motion failed to prepare.");
             double phase = (double)step / factor;
             using var expected = LayeredScene(phase);
             var result = renderer.RenderIntermediate(step, factor, 0, PreviewUpscaler.Standard);
@@ -144,13 +150,18 @@ internal static class CappedGameDiagnostics
             for (int y = 26; y < 52; y++)
                 Require(pixels.AsSpan((y * 640 + 42) * 4, 138 * 4).SequenceEqual(expected.Bytes.AsSpan((y * 640 + 42) * 4, 138 * 4)),
                     "Layered motion changed the static HUD.");
-            if (renderer.HardwareOpticalFlowActive)
+            if (renderer.HardwareOpticalFlowActive && factor <= 3)
+                Require(result.Kind == PresentationKind.Repeated && renderer.FrameGenerationDetail == "Uncertain motion fallback"
+                    && pixels.AsSpan().SequenceEqual(first.Bytes.AsSpan(0, first.Length)),
+                    $"Layered motion produced an unsafe image at {factor}x phase {step}.");
+            else if (renderer.HardwareOpticalFlowActive)
                 Require(result.Kind == PresentationKind.Interpolated && error < repeatError * .4 && badPixels < 4500,
                     $"Layered motion showed excessive distortion at {factor}x phase {step}: {badPixels} high-error pixels.");
-            measurements.Add(new { phase, hardware = renderer.HardwareOpticalFlowActive,
+            measurements.Add(new { factor, step, phase, hardware = renderer.HardwareOpticalFlowActive,
                 generated = result.Kind == PresentationKind.Interpolated, badPixels,
                 meanError = error / (440.0 * 210 * 3), repeatMeanError = repeatError / (440.0 * 210 * 3),
-                generatedFraction = renderer.GeneratedPixelFraction });
+                generatedFraction = renderer.GeneratedPixelFraction,
+                unmatchedHighContrastFraction = renderer.UnmatchedHighContrastFraction });
             UpscalingDiagnostics.SavePng(Path.Combine(folder, $"layered-{factor}x-{step}.png"), pixels, 640, 360);
             UpscalingDiagnostics.SavePng(Path.Combine(folder, $"layered-{factor}x-{step}-expected.png"), expected.Bytes, 640, 360);
         }
@@ -170,27 +181,84 @@ internal static class CappedGameDiagnostics
             last.Bytes[(y * 640 + x) * 4 + channel] ^= 112;
         first.Time = 1_000_000;
         last.Time = first.Time + period;
-        Require(renderer.PrepareInterpolation(first, period, true) && renderer.PrepareInterpolation(last, period, true),
-            "Incompatible motion failed to prepare.");
-        if (!renderer.HardwareOpticalFlowActive) return "NVIDIA optical flow unavailable";
-        Require(renderer.CanGenerateMidpoint, "The fixture did not reach synthesis: " + renderer.FrameGenerationDetail);
-        var info = renderer.RenderIntermediate(1, 4, 0, PreviewUpscaler.Standard);
-        Require(info.Kind == PresentationKind.Repeated && !renderer.CanGenerateMidpoint
-            && renderer.FrameGenerationDetail == "Uncertain motion fallback"
-            && first.Bytes.AsSpan(0, first.Length).SequenceEqual(renderer.Readback()),
-            "Incompatible motion showed synthesized pixels: " + renderer.FrameGenerationDetail);
-        Require(renderer.RenderIntermediate(3, 4, 0, PreviewUpscaler.Standard).Kind == PresentationKind.Repeated,
-            "A later phase retried a rejected pair.");
-        return renderer.FrameGenerationDetail;
+        foreach (int factor in new[] { 2, 3, 4 })
+        {
+            renderer.ResetInterpolation();
+            Require(renderer.PrepareInterpolation(first, period, true) && renderer.PrepareInterpolation(last, period, true),
+                "Incompatible motion failed to prepare.");
+            if (!renderer.HardwareOpticalFlowActive) return "NVIDIA optical flow unavailable";
+            Require(renderer.CanGenerateMidpoint, "The fixture did not reach synthesis: " + renderer.FrameGenerationDetail);
+            var info = renderer.RenderIntermediate(1, factor, 0, PreviewUpscaler.Standard);
+            Require(info.Kind == PresentationKind.Repeated && !renderer.CanGenerateMidpoint
+                && renderer.FrameGenerationDetail == "Uncertain motion fallback"
+                && first.Bytes.AsSpan(0, first.Length).SequenceEqual(renderer.Readback()),
+                $"Incompatible motion showed synthesized pixels at {factor}x: {renderer.FrameGenerationDetail}");
+            if (factor > 2)
+                Require(renderer.RenderIntermediate(factor - 1, factor, 0, PreviewUpscaler.Standard).Kind == PresentationKind.Repeated,
+                    $"A later phase retried a rejected {factor}x pair.");
+        }
+        return "Uncertain motion fallback";
     }
 
-    static Packet LayeredScene(double phase)
+    static object CheckLocalizedOcclusion(string folder, long period, int rate)
+    {
+        using var renderer = new D3DPreview(0, 640, 360) { DisableFrameBudgetForDiagnostics = true };
+        using var first = LayeredScene(0, stationaryCamera: true);
+        using var last = LayeredScene(1, stationaryCamera: true);
+        first.Time = 1_000_000;
+        last.Time = first.Time + period;
+        var measurements = new List<object>();
+        foreach (var (step, factor) in new[] { (1, 2), (1, 3), (2, 3) })
+        {
+            renderer.ResetInterpolation();
+            Require(renderer.PrepareInterpolation(first, period) && renderer.PrepareInterpolation(last, period),
+                "Localized occlusion failed to prepare.");
+            if (!renderer.HardwareOpticalFlowActive) return "NVIDIA optical flow unavailable";
+
+            renderer.DisableBackgroundRecoveryForDiagnostics = true;
+            var baseline = renderer.RenderIntermediate(step, factor, 0, PreviewUpscaler.Standard);
+            var before = renderer.Readback();
+            renderer.DisableBackgroundRecoveryForDiagnostics = false;
+            var recovered = renderer.RenderIntermediate(step, factor, 0, PreviewUpscaler.Standard);
+            var after = renderer.Readback();
+            Require(baseline.Kind == PresentationKind.Interpolated && recovered.Kind == PresentationKind.Interpolated,
+                $"Localized occlusion stopped generating at {rate} fps and {factor}x phase {step}.");
+
+            using var expected = LayeredScene((double)step / factor, stationaryCamera: true);
+            var beforeError = MeasureSilhouette(before, expected.Bytes);
+            var afterError = MeasureSilhouette(after, expected.Bytes);
+            Require(afterError.Trailing < beforeError.Trailing && afterError.Missing <= beforeError.Missing,
+                $"Background recovery left more silhouette error at {rate} fps and {factor}x phase {step}: {beforeError} to {afterError}.");
+            measurements.Add(new { factor, step, trailingBefore = beforeError.Trailing, trailingAfter = afterError.Trailing,
+                missingBefore = beforeError.Missing, missingAfter = afterError.Missing });
+            UpscalingDiagnostics.SavePng(Path.Combine(folder, $"localized-{rate}-{factor}x-{step}.png"), after, 640, 360);
+        }
+        return measurements;
+    }
+
+    static (int Trailing, int Missing) MeasureSilhouette(byte[] pixels, byte[] expected)
+    {
+        static bool Foreground(byte[] data, int i) => data[i + 2] > 180 && data[i] < 70 && data[i + 1] < 70;
+
+        int trailing = 0, missing = 0;
+        for (int y = 120; y < 244; y++)
+        for (int x = 205; x < 350; x++)
+        {
+            int offset = (y * 640 + x) * 4;
+            bool found = Foreground(pixels, offset), wanted = Foreground(expected, offset);
+            if (found && !wanted) trailing++;
+            if (!found && wanted) missing++;
+        }
+        return (trailing, missing);
+    }
+    static Packet LayeredScene(double phase, bool stationaryCamera = false)
     {
         var frame = new Packet(640 * 360 * 4, false, 640, 360) { Duration = 166666 };
         for (int y = 0; y < 360; y++)
         for (int x = 0; x < 640; x++)
         {
-            double worldX = x + 24 * phase, worldY = y + 8 * phase;
+            double cameraPhase = stationaryCamera ? 0 : phase;
+            double worldX = x + 24 * cameraPhase, worldY = y + 8 * cameraPhase;
             double localX = x - 36 * phase, localY = y + 12 * phase;
             bool foreground = localX >= 220 && localX < 304 && localY >= 138 && localY < 240;
             int offset = (y * 640 + x) * 4;

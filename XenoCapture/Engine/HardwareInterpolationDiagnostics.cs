@@ -26,7 +26,7 @@ internal static class HardwareInterpolationDiagnostics
             }
             generated/=samples;repeated/=samples;blend/=samples;
             string name=localized?"localizedObject":"cameraRotationZoomAndObject";
-            checks[name]=new {hardware=renderer.HardwareOpticalFlowActive,generatedError=generated,repeatedError=repeated,blendedError=blend,generatedPixelFraction=renderer.GeneratedPixelFraction,analysisMs=renderer.FrameAnalysisMs};
+            checks[name]=new {hardware=renderer.HardwareOpticalFlowActive,generatedError=generated,repeatedError=repeated,blendedError=blend,generatedPixelFraction=renderer.GeneratedPixelFraction,unmatchedHighContrastFraction=renderer.UnmatchedHighContrastFraction,analysisMs=renderer.FrameAnalysisMs};
             File.WriteAllText(Path.Combine(folder,"motion-quality-stage.json"),System.Text.Json.JsonSerializer.Serialize(checks));
             Require(generated<repeated*.85,"Interpolation did not improve moving-object/camera accuracy.");
             Require(generated<blend*.95,"Interpolation did not improve on a simple frame blend.");

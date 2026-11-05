@@ -91,20 +91,35 @@ internal sealed class Recorder
             {
                 Packet? packet = null;
                 // Merge by capture time rather than draining one stream ahead of the other.
-                bool hasV = video.TryPeek(out var vp), hasA = audio.TryPeek(out var ap);
-                if (hasA && (!hasV || ap!.Time <= vp!.Time)) audio.TryDequeue(out packet);
-                else if (hasV) video.TryDequeue(out packet);
+                bool hasVideo = video.TryPeek(out var nextVideo);
+                bool hasAudio = audio.TryPeek(out var nextAudio);
+                if (hasAudio && (!hasVideo || nextAudio!.Time <= nextVideo!.Time))
+                    audio.TryDequeue(out packet);
+                else if (hasVideo)
+                    video.TryDequeue(out packet);
                 if (packet != null)
                 {
                     using (packet)
                     {
                         if (packet.Audio && aus == uint.MaxValue) continue;
-                        long t = Math.Max(0, packet.Time - origin);
-                        if (packet.Audio) { t = Math.Max(t, lastAudio + 1); lastAudio = t; }
-                        else { t = Math.Max(t, lastVideo + 1); lastVideo = t; }
-                        using var converted = !packet.Audio && scaler != null && packet.Layout == PixelLayout.Nv12 ? PixelConversion.ToBgra(packet) : null;
-                        var bytes = packet.Audio || scaler == null ? packet.Bytes.AsSpan(0, packet.Length) : scaler.Resize(converted ?? packet);
-                        using var sample = Native.Sample(bytes, t, packet.Duration); Native.Write(writer, packet.Audio ? aus : vs, sample); if (!packet.Audio) Interlocked.Increment(ref videoSamples);
+                        long sampleTime = Math.Max(0, packet.Time - origin);
+                        if (packet.Audio)
+                        {
+                            sampleTime = Math.Max(sampleTime, lastAudio + 1);
+                            lastAudio = sampleTime;
+                        }
+                        else
+                        {
+                            sampleTime = Math.Max(sampleTime, lastVideo + 1);
+                            lastVideo = sampleTime;
+                        }
+                        using var converted = !packet.Audio && scaler != null && packet.Layout == PixelLayout.Nv12
+                            ? PixelConversion.ToBgra(packet) : null;
+                        var bytes = packet.Audio || scaler == null
+                            ? packet.Bytes.AsSpan(0, packet.Length) : scaler.Resize(converted ?? packet);
+                        using var sample = Native.Sample(bytes, sampleTime, packet.Duration);
+                        Native.Write(writer, packet.Audio ? aus : vs, sample);
+                        if (!packet.Audio) Interlocked.Increment(ref videoSamples);
                     }
                     continue;
                 }

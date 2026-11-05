@@ -21,18 +21,6 @@ internal static class FrameGenerationPolicy
         long period = capturePeriod * repeats;
         return Math.Abs(period - 333333) <= 5000 ? period : 333333;
     }
-    internal static long SourceHoldUntil(long sourceTime, long period, long arrival,
-        long previousTime, long previousArrival, long previousPresent, double drawMs)
-    {
-        if (period is < 80_000 or > 700_000 || previousArrival == 0 || arrival <= previousArrival) return 0;
-        long interval = sourceTime - previousTime;
-        if (interval < period * 3 / 4 || interval > period * 5 / 4) return 0;
-        // Correct short arrival gaps only. A late frame or a discontinuity
-        // should never accumulate another frame of waiting.
-        if (interval - (arrival - previousArrival) <= 3_500) return 0;
-        long work = Math.Clamp((long)(drawMs * 10_000), 0, period / 8);
-        return Math.Min(previousPresent + interval - work, arrival + Math.Min(20_000, period / 8));
-    }
     internal static long CadenceLead(long period, int multiplier, double analysisMs)
     {
         // Leave room for the measured work and a small wake-up margin. Bound
@@ -47,6 +35,9 @@ internal static class FrameGenerationPolicy
         long error = desired - due;
         return Math.Abs(error) > period / 2 ? 0 : Math.Clamp(error / 8, -2_000, 2_000);
     }
+    internal static bool ShouldPresentPhase(PresentationKind kind, bool intermediate, long pair, long lastGeneratedPair)
+        => kind != PresentationKind.Repeated || !intermediate || pair == 0 || pair != lastGeneratedPair;
+
     internal static long PhaseTime(long start, long period, int step, int multiplier) => start + period * step / multiplier;
     internal static int MissedPhases(long now, long due, long period, int multiplier)
     {
