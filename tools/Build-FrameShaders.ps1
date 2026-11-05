@@ -2,7 +2,7 @@ param([string]$Compiler = 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621
 $ErrorActionPreference = 'Stop'
 $shaderDirectory = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\XenoCapture\Shaders')).Path
 if (-not (Test-Path -LiteralPath $Compiler -PathType Leaf)) { throw 'Pass the x64 Windows SDK fxc.exe path with -Compiler.' }
-foreach ($entry in @('Downsample','Compare','Motion','Hardware','Synthesize','SynthesizeSlow')) {
+foreach ($entry in @('Downsample','Compare','Motion','Hardware','Predict','Synthesize','SynthesizeSlow')) {
     & $Compiler /nologo /T cs_5_0 /E $entry /O3 /Fo (Join-Path $shaderDirectory ('Frame' + $entry + '.cso')) (Join-Path $shaderDirectory 'FrameInterpolation.hlsl')
     if ($LASTEXITCODE -ne 0) { throw ('Shader compilation failed: ' + $entry) }
 }

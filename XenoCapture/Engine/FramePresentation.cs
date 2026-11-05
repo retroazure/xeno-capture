@@ -4,14 +4,51 @@ using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
 namespace XenoCapture.Engine;
-internal enum FrameGenerationMode { Off, Adaptive2x, Adaptive3x, Adaptive4x }
-internal enum PresentationKind { Source, Interpolated, Repeated }
+internal enum FrameGenerationMode { Off, Adaptive2x, Adaptive3x, Adaptive4x, Predictive60, Predictive120, Predictive180, RecoverGaps }
+internal enum PresentationKind { Source, Interpolated, Repeated, Predicted }
 internal enum FrameSlotWait { Ready, Interrupted, TimedOut }
 internal readonly record struct PresentedFrame(long Time, long Duration, PresentationKind Kind = PresentationKind.Source);
+internal readonly record struct SourceFramePacing(long Time, long Duration, long Arrival)
+{
+    internal static bool HasRefreshHeadroom(double refreshHz, long period) =>
+        period is >= 80_000 and <= 500_000
+        && refreshHz + Math.Max(1.1, refreshHz * .01) >= 20_000_000.0 / period;
+
+    internal long Deadline(long time, long duration, long arrival, double refreshHz)
+    {
+        if (Arrival == 0 || time <= Time || !HasRefreshHeadroom(refreshHz, duration)
+            || Duration < duration - duration / 16 || Duration > duration + duration / 16)
+            return arrival;
+
+        long sourceGap = time - Time, arrivalGap = arrival - Arrival;
+        // Use the capture clock as the cadence reference. Bypass discontinuities
+        // and bursts that are too large for a short correction.
+        if (sourceGap < duration - duration / 12 || sourceGap > duration + duration / 12
+            || arrivalGap < sourceGap * 3 / 4 || arrivalGap > sourceGap - 7_500)
+            return arrival;
+
+        long maximumHold = Math.Min(20_000, Math.Min(duration / 8, (long)(5_000_000 / refreshHz)));
+        return arrival + Math.Min(sourceGap - arrivalGap, maximumHold);
+    }
+}
+
 internal static class FrameGenerationPolicy
 {
     internal static int Multiplier(FrameGenerationMode mode) => mode switch
     { FrameGenerationMode.Adaptive2x => 2, FrameGenerationMode.Adaptive3x => 3, FrameGenerationMode.Adaptive4x => 4, _ => 1 };
+    internal static int PredictiveTarget(FrameGenerationMode mode) => mode switch
+    { FrameGenerationMode.Predictive60 => 60, FrameGenerationMode.Predictive120 => 120, FrameGenerationMode.Predictive180 => 180, _ => 0 };
+    internal static string WaitingStatus(FrameGenerationMode mode) => mode == FrameGenerationMode.Off ? "Off"
+        : PredictiveTarget(mode) > 0 || mode == FrameGenerationMode.RecoverGaps
+            ? "Waiting for video · no frame buffering" : "Waiting for video · adds one frame of delay";
+    internal static long GapRecoveryGrace(long period) => Math.Min(15_000, period / 8);
+    internal static long GapRecoveryExpiry(long period) => period + Math.Min(80_000, period / 2);
+    internal static long PredictionInterval(int target, double refreshHz, long contentPeriod)
+    {
+        if (target <= 0 || refreshHz <= 1 || contentPeriod is < 80_000 or > 700_000) return 0;
+        long interval = (long)Math.Round(10_000_000 / Math.Min(target, refreshHz));
+        return contentPeriod >= interval + interval / 4 ? interval : 0;
+    }
     internal static bool CanGenerate(long period, double refreshHz, int width, int height, int multiplier) =>
         multiplier is >= 2 and <= 4 && period >= 80_000 && period <= 700_000 && refreshHz > 1 && 10_000_000.0 * multiplier / period <= refreshHz + Math.Max(1.1, refreshHz * .01) && width > 0 && height > 0 && (long)width * height <= 1920L * 1080;
     internal static long Content30Period(long capturePeriod)

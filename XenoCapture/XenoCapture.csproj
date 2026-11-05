@@ -35,6 +35,7 @@
     <EmbeddedResource Include="Shaders\FrameDownsample.cso" LogicalName="XenoCapture.Frame.Downsample" />
     <EmbeddedResource Include="Shaders\FrameCompare.cso" LogicalName="XenoCapture.Frame.Compare" />
     <EmbeddedResource Include="Shaders\FrameMotion.cso" LogicalName="XenoCapture.Frame.Motion" />
+    <EmbeddedResource Include="Shaders\FramePredict.cso" LogicalName="XenoCapture.Frame.Predict" />
     <EmbeddedResource Include="Shaders\FrameHardware.cso" LogicalName="XenoCapture.Frame.Hardware" />
     <EmbeddedResource Include="Shaders\FrameSynthesize.cso" LogicalName="XenoCapture.Frame.Synthesize" />
     <EmbeddedResource Include="Shaders\FrameSynthesizeSlow.cso" LogicalName="XenoCapture.Frame.SynthesizeSlow" />

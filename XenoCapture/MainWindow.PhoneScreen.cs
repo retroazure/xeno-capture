@@ -10,6 +10,7 @@ namespace XenoCapture;
 public partial class MainWindow
 {
     bool phoneWindowPreview, phoneVolumeUpdating;
+    (bool AiEnabled, PreviewUpscaler Upscaler)? previewBeforePhone;
     AndroidUsbCaptureBackend? phoneAudioBackend;
     int? pendingPhoneVolume;
 
@@ -64,6 +65,21 @@ public partial class MainWindow
         await connectionStart.Run(ConnectPhoneUsb);
     });
 
+    void ApplyPhonePreviewDefaults()
+    {
+        previewBeforePhone = (SelectedAiVideo.Enabled, SelectedUpscaler);
+        AiVideoToggle.IsChecked = false;
+        PreviewUpscaling.SelectedIndex = (int)PreviewUpscaler.Standard;
+    }
+
+    void RestorePreviewAfterPhone()
+    {
+        if (previewBeforePhone is not { } previous) return;
+        PreviewUpscaling.SelectedIndex = (int)previous.Upscaler;
+        AiVideoToggle.IsChecked = previous.AiEnabled;
+        previewBeforePhone = null;
+    }
+
     async Task ConnectPhoneUsb()
     {
         using var operation = BusyScope();
@@ -71,10 +87,11 @@ public partial class MainWindow
         if (dialog.ShowDialog() != true || closing || sessions.Active) return;
         int session = sessions.Begin();
         bool playAudio = dialog.PlayPhoneAudio;
-        var backend = new AndroidUsbCaptureBackend(playAudio: playAudio);
+        var backend = new AndroidUsbCaptureBackend(playAudio: playAudio, profile: dialog.SelectedProfile);
         var input = new CaptureStream(() => backend, TimeSpan.FromSeconds(2));
         if (playAudio) SetPhoneAudioBackend(backend);
         phoneWindowPreview = true;
+        ApplyPhonePreviewDefaults();
         video = input;
         input.Data += packet => OnData(session, packet, 0);
         input.Failed += ex => ReportInputFailure(session, ex);

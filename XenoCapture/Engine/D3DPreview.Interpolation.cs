@@ -50,7 +50,7 @@ internal sealed unsafe partial class D3DPreview
     public PresentedFrame CachedFrame => new(frameCurrentTime, frameCurrentDuration);
     public PresentedFrame PreviousFrame => new(framePreviousTime, framePreviousDuration);
     internal long FrameGenerationSurfaceBytes => HasInterpolationFrame ? (long)frameWidth * frameHeight * 12 + (long)analysisWidth * analysisHeight * 8 + (long)flowWidth * flowHeight * (HardwareOpticalFlowActive ? 42 : 32) : 0;
-    void EnsureInterpolation(int w, int h)
+    void EnsureInterpolation(int w, int h, bool predictive = false)
     {
         if (ForceFrameGenerationUnavailable) throw new InterpolationUnavailableException("Frame generation is unavailable on this device.");
         if ((long)w * h > 1920L * 1080) throw new InterpolationUnavailableException("Lightweight frame generation supports up to 1080p input.");
@@ -62,7 +62,7 @@ internal sealed unsafe partial class D3DPreview
         frameDownsample = Shader(DownsampleCode.Value, 18); frameCompare = Shader(CompareCode.Value, 18);
         frameMotion = Shader(MotionCode.Value, 18); frameSynthesize = Shader(SynthesizeCode.Value, 18);
         for (int index = 0; index < 2; index++) { frameRgb[index] = new GpuSurface(this, w, h, true, 87); frameLow[index] = new GpuSurface(this, analysisWidth, analysisHeight, false); }
-        EnsureOpticalFlow(w,h);
+        if (!predictive) EnsureOpticalFlow(w,h);
         if (HardwareOpticalFlowActive) frameSlowSynthesize = Shader(SlowSynthesizeCode.Value, 18);
         frameForward = new GpuSurface(this, flowWidth, flowHeight, false, 2); frameBackward = new GpuSurface(this, flowWidth, flowHeight, false, 2);
         frameGenerated = new GpuSurface(this, w, h, false);
@@ -104,12 +104,24 @@ internal sealed unsafe partial class D3DPreview
         uint* zeros=stackalloc uint[4]; zeros[0]=zeros[1]=zeros[2]=zeros[3]=0;
         ((delegate* unmanaged[Stdcall]<nint,nint,uint*,void>)context.Slot(51))(context.P,frameStatsView!.P,zeros);
     }
-    FrameStatistics ReadFrameStatistics()
+    void CopyFrameStatistics()
     {
         ((delegate* unmanaged[Stdcall]<nint,nint,nint,void>)context.Slot(47))(context.P,frameStatsReadback!.P,frameStats!.P);
-        Mapped read; Native.Hr(((delegate* unmanaged[Stdcall]<nint,nint,uint,uint,uint,Mapped*,int>)context.Slot(14))(context.P,frameStatsReadback.P,0,1,0,&read));
-        try { var data=(uint*)read.Data; return new(data[0],data[1],data[2],data[3],data[4],data[5],data[6]); }
+    }
+    bool TryMapFrameStatistics(uint flags, out FrameStatistics statistics)
+    {
+        Mapped read;
+        int result = ((delegate* unmanaged[Stdcall]<nint,nint,uint,uint,uint,Mapped*,int>)context.Slot(14))(context.P,frameStatsReadback!.P,0,1,flags,&read);
+        if (flags != 0 && result == unchecked((int)0x887A000A)) { statistics = default; return false; }
+        Native.Hr(result);
+        try { var data=(uint*)read.Data; statistics = new(data[0],data[1],data[2],data[3],data[4],data[5],data[6]); return true; }
         finally { ((delegate* unmanaged[Stdcall]<nint,nint,uint,void>)context.Slot(15))(context.P,frameStatsReadback.P,0); }
+    }
+    FrameStatistics ReadFrameStatistics()
+    {
+        CopyFrameStatistics();
+        TryMapFrameStatistics(0, out var statistics);
+        return statistics;
     }
     bool SkipRepeatedCapture(long start)
     {
@@ -251,6 +263,8 @@ internal sealed unsafe partial class D3DPreview
     { DisposeInterpolation(); frameDisabled = false; FrameGenerationFailure = null; FrameGenerationDetail = "Warming up"; frameCooldown = 0; frameAnalysisSamples = frameBudgetOverruns = 0; FrameWasDuplicate = false; }
     void DisposeInterpolation()
     {
+        framePredict?.Dispose(); framePredict = null;
+        predictionReadbackPending = false;
         fullscreenMotionOutput = null;
         if (context != null)
         {

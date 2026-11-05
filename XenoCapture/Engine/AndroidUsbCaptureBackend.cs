@@ -13,7 +13,10 @@ using Microsoft.Win32.SafeHandles;
 
 namespace XenoCapture.Engine;
 
-internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playAudio = false) : ICaptureBackend
+internal enum AndroidPreviewProfile { Responsive, Smooth, HighDetail }
+
+internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playAudio = false,
+    AndroidPreviewProfile profile = AndroidPreviewProfile.Responsive) : ICaptureBackend
 {
     const string HelperFolder = "android";
     static readonly (string Name, string Sha256)[] HelperFiles =
@@ -117,18 +120,7 @@ internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playA
         cancellation.ThrowIfCancellationRequested();
         if (adb!.HasExited) throw new InvalidOperationException("The Android USB service stopped.");
         string title = "Xeno Android preview " + Guid.NewGuid().ToString("N")[..8];
-        // Windows Graphics Capture needs a rendered window. Keep the helper beyond the desktop.
-        var preview = HelperProcess("scrcpy.exe", "--select-usb", "--no-control",
-            "--no-clipboard-autosync", "--window-borderless", "--window-x=30000", "--window-y=30000",
-            "--max-size=1920", "--max-fps=60", "--video-buffer=0", "--window-title=" + title);
-        if (playAudio)
-        {
-            preview.ArgumentList.Add("--audio-source=output");
-            preview.ArgumentList.Add("--audio-codec=raw");
-        }
-        else preview.ArgumentList.Add("--no-audio");
-        preview.Environment["SDL_WINDOW_ACTIVATE_WHEN_SHOWN"] = "0";
-        lock (playbackGate) scrcpy = job!.Start(preview);
+        lock (playbackGate) scrcpy = job!.Start(CreatePreviewProcess(title));
         long start = Stopwatch.GetTimestamp();
         do
         {
@@ -145,6 +137,29 @@ internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playA
             if (cancellation.WaitHandle.WaitOne(40)) cancellation.ThrowIfCancellationRequested();
         } while (Stopwatch.GetElapsedTime(start) < TimeSpan.FromSeconds(12));
         throw new TimeoutException("The phone connected but did not open a preview. Unlock it and try again.");
+    }
+
+    internal ProcessStartInfo CreatePreviewProcess(string title)
+    {
+        var (size, fps, bitrate) = profile switch
+        {
+            AndroidPreviewProfile.Smooth => ("1280", "60", "5M"),
+            AndroidPreviewProfile.HighDetail => ("1920", "60", "8M"),
+            _ => ("1280", "30", "4M")
+        };
+        // Windows Graphics Capture needs a rendered window. Keep the helper beyond the desktop.
+        var preview = HelperProcess("scrcpy.exe", "--select-usb", "--no-control",
+            "--no-clipboard-autosync", "--window-borderless", "--window-x=30000", "--window-y=30000",
+            "--max-size=" + size, "--max-fps=" + fps, "--video-bit-rate=" + bitrate,
+            "--video-buffer=0", "--window-title=" + title);
+        if (playAudio)
+        {
+            preview.ArgumentList.Add("--audio-source=output");
+            preview.ArgumentList.Add("--audio-codec=raw");
+        }
+        else preview.ArgumentList.Add("--no-audio");
+        preview.Environment["SDL_WINDOW_ACTIVATE_WHEN_SHOWN"] = "0";
+        return preview;
     }
 
     ProcessStartInfo HelperProcess(string executable, params string[] arguments)

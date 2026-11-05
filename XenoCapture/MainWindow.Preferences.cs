@@ -14,9 +14,12 @@ public partial class MainWindow
     void LoadSettings()
     {
         var settings = ReadPreferences(SettingsPath, LegacySettingsPath);
-        if (settings != null) ApplyPreferences(settings);
+        if (settings != null) ApplyStartupPreferences(settings);
         UpdateFolderLabel();
     }
+
+    void ApplyStartupPreferences(Preferences settings) =>
+        ApplyPreferences(settings with { Upscaling = (int)PreviewUpscaler.Standard, AiEnabled = false });
 
     static Preferences? ReadPreferences(string current, string legacy)
     {
@@ -65,8 +68,9 @@ public partial class MainWindow
         Bitrate.SelectedIndex = Math.Clamp(settings.Bitrate, 0, 3);
         Sharpness.Value = Math.Clamp(settings.Sharpness, 0, 1);
         PreviewUpscaling.SelectedIndex = settings.Upscaling is >= 0 and <= (int)PreviewUpscaler.Performance ? settings.Upscaling : 0;
-        PreviewFrameGeneration.SelectedIndex = settings.Interpolation is >= 0 and <= 3 ? settings.Interpolation : 0;
+        PreviewFrameGeneration.SelectedIndex = settings.Interpolation is >= 0 and <= (int)FrameGenerationMode.RecoverGaps ? settings.Interpolation : 0;
         Capped30GameToggle.IsChecked = settings.Capped30Game;
+        SourcePacingToggle.IsChecked = settings.SmoothSourcePacing;
         AiVideoResolution.SelectedIndex = settings.AiResolution switch
         {
             720 => 1,
@@ -89,17 +93,18 @@ public partial class MainWindow
             Resolution: OutputResolution.SelectedIndex,
             Bitrate: Bitrate.SelectedIndex,
             Sharpness: Sharpness.Value,
-            Upscaling: (int)SelectedUpscaler,
+            Upscaling: (int)(previewBeforePhone?.Upscaler ?? SelectedUpscaler),
             Interpolation: (int)SelectedFrameGeneration,
             Capped30Game: SelectedCapped30Game,
-            AiEnabled: aiVideo.Enabled,
+            AiEnabled: previewBeforePhone?.AiEnabled ?? aiVideo.Enabled,
             AiResolution: aiVideo.OutputHeight,
             AiQuality: aiVideo.Quality,
             LightTheme: lightTheme,
             InterfaceSounds: SoundsToggle.IsChecked == true,
             InterfaceMotion: MotionToggle.IsChecked == true,
             FullscreenDisplayDevice: fullscreenDisplayDevice,
-            FullscreenEdgeSmoothing: FullscreenEdgeSmoothing.IsChecked == true);
+            FullscreenEdgeSmoothing: FullscreenEdgeSmoothing.IsChecked == true,
+            SmoothSourcePacing: SelectedSourcePacing);
     }
 
     void SaveSettings()
@@ -129,5 +134,5 @@ public partial class MainWindow
         }
     }
     void UpdateFolderLabel() { FolderLabel.Text = folder; FolderLabel.ToolTip = folder; }
-    sealed record Preferences(string Folder, string? Video, string? Audio, int Resolution, int Bitrate, double Sharpness, int Upscaling = 0, int Interpolation = 0, bool Capped30Game = false, bool AiEnabled=false,int AiResolution=0,int AiQuality=3,bool LightTheme=false,bool InterfaceSounds=true,bool InterfaceMotion=true, string? FullscreenDisplayDevice = null, bool FullscreenEdgeSmoothing = true);
+    sealed record Preferences(string Folder, string? Video, string? Audio, int Resolution, int Bitrate, double Sharpness, int Upscaling = 0, int Interpolation = 0, bool Capped30Game = false, bool AiEnabled=false,int AiResolution=0,int AiQuality=3,bool LightTheme=false,bool InterfaceSounds=true,bool InterfaceMotion=true, string? FullscreenDisplayDevice = null, bool FullscreenEdgeSmoothing = true, bool SmoothSourcePacing = true);
 }

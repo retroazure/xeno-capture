@@ -9,6 +9,13 @@
     <TextBlock x:Name="AndroidUsbHint"
                Text="Connect one Android phone with a USB data cable. Enable USB debugging, unlock the phone, then press Play and approve the request on the phone."
                TextWrapping="Wrap" Foreground="{DynamicResource Muted}" Margin="0,8,0,8"/>
+    <TextBlock Text="Preview profile" Margin="0,6,0,4"/>
+    <ComboBox x:Name="PreviewProfile" SelectedIndex="0" AutomationProperties.Name="Phone preview profile"
+              ToolTip="Choose Responsive to reduce encoding load on older phones. The size is the maximum length of either edge.">
+      <ComboBoxItem Content="Responsive · 1280 px / 30 FPS"/>
+      <ComboBoxItem Content="Smooth · 1280 px / 60 FPS"/>
+      <ComboBoxItem Content="High detail · 1920 px / 60 FPS"/>
+    </ComboBox>
     <CheckBox x:Name="PhoneAudio" Content="Phone output · Android 11 or newer" Margin="0,8,0,4"/>
     <TextBlock Text="Routes the phone's sound to this PC during mirroring."
                TextWrapping="Wrap" Foreground="{DynamicResource Muted}" Margin="0,6,0,0"/>

@@ -169,6 +169,29 @@ bool ValidWarp(float2 uv, float2 source, float2 match, float4 flow, float4 oppos
         && dot(positionError, positionError) < .85 * .85;
 }
 
+// Predict from the newest image. A backward vector points to where the
+// surface was, so it also locates the newest sample for a future pixel.
+[numthreads(16,8,1)] void Predict(uint3 id : SV_DispatchThreadID) {
+    if (any(id.xy >= uint2(SourceSize))) return;
+    float2 uv = (id.xy + .5) / SourceSize;
+    float3 latest = B.Load(int3(id.xy, 0)).rgb;
+    float3 result = latest;
+    if (Max3(abs(latest - A.Load(int3(id.xy, 0)).rgb)) > .006) {
+        float2 source = uv;
+        [unroll] for (int i = 0; i < 2; i++)
+            source = uv + Alpha * Backward.SampleLevel(LinearClamp, source, 0).xy;
+        float4 motion = Backward.SampleLevel(LinearClamp, source, 0);
+        float2 match = source + motion.xy;
+        float4 opposite = Forward.SampleLevel(LinearClamp, match, 0);
+        if (ValidWarp(uv, source, match, motion, opposite, -Alpha)) {
+            float3 sample = B.SampleLevel(LinearClamp, source, 0).rgb;
+            float3 history = A.SampleLevel(LinearClamp, match, 0).rgb;
+            if (Max3(abs(sample - history)) < .065) result = sample;
+        }
+    }
+    Output0[id.xy] = float4(result, 1);
+}
+
 bool RecoverConsistentWarp(float2 uv, float2 motion, out float3 result) {
     result = 0;
     float2 pa = uv - Alpha * motion, pb = uv + (1 - Alpha) * motion;

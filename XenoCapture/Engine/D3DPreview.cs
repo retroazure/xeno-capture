@@ -23,6 +23,8 @@ internal sealed unsafe partial class D3DPreview : IDisposable
     [StructLayout(LayoutKind.Sequential)] struct SamplerDesc
     { public uint Filter, U, V, W; public float Bias; public uint Anisotropy, Comparison; public float R, G, B, A, MinLod, MaxLod; }
     [StructLayout(LayoutKind.Sequential)] struct Viewport { public float X, Y, Width, Height, MinDepth, MaxDepth; }
+    [StructLayout(LayoutKind.Sequential)] struct PresentParameters
+    { public uint DirtyRectCount; public nint DirtyRects, ScrollRect, ScrollOffset; }
     [DllImport("kernel32.dll", SetLastError = true)] static extern uint WaitForMultipleObjects(uint count, nint* handles, int waitAll, uint milliseconds);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(nint handle);
     Com device = null!, context = null!;
@@ -139,13 +141,13 @@ internal sealed unsafe partial class D3DPreview : IDisposable
         if (swap != null) Native.Hr(((delegate* unmanaged[Stdcall]<nint, uint, uint, uint, uint, uint, int>)swap.Slot(13))(swap.P, 0, (uint)w, (uint)h, 0, 0x40));
         CreateTarget();
     }
-    public FrameSlotWait WaitForFrameSlot(nint interrupt)
+    public FrameSlotWait WaitForFrameSlot(nint interrupt, uint timeoutMs)
     {
         // Preserve the consumed credit until Present succeeds, including when
         // a configuration change supersedes the frame that was waiting.
         if (frameSlotReady || frameReady == 0) return FrameSlotWait.Ready;
         nint* handles = stackalloc nint[2] { frameReady, interrupt };
-        uint result = WaitForMultipleObjects(2, handles, 0, 20);
+        uint result = WaitForMultipleObjects(2, handles, 0, timeoutMs);
         if (result == 0) { frameSlotReady = true; return FrameSlotWait.Ready; }
         if (result == 1) return FrameSlotWait.Interrupted;
         if (result == 258) return FrameSlotWait.TimedOut;
@@ -348,10 +350,23 @@ internal sealed unsafe partial class D3DPreview : IDisposable
         ((delegate* unmanaged[Stdcall]<nint, uint, Viewport*, void>)context.Slot(44))(context.P, 1, &viewport);
         ((delegate* unmanaged[Stdcall]<nint, uint, uint, void>)context.Slot(13))(context.P, 3, 0);
     }
-    public bool Present()
+    public bool Present(bool allowBlocking)
     {
         if (swap == null) return true;
-        int status = ((delegate* unmanaged[Stdcall]<nint, uint, uint, int>)swap.Slot(8))(swap.P, 0, 0);
+        const int stillDrawing = unchecked((int)0x887A000A);
+        const uint doNotWait = 0x8;
+        int status;
+        if (allowBlocking)
+        {
+            status = ((delegate* unmanaged[Stdcall]<nint, uint, uint, int>)swap.Slot(8))(swap.P, 0, 0);
+        }
+        else
+        {
+            PresentParameters parameters = default;
+            status = ((delegate* unmanaged[Stdcall]<nint, uint, uint, PresentParameters*, int>)swap.Slot(22))
+                (swap.P, 0, doNotWait, &parameters);
+            if (status == stillDrawing) return false;
+        }
         if(status<0){int reason=((delegate* unmanaged[Stdcall]<nint,int>)device.Slot(39))(device.P);throw new COMException($"D3D11 presentation failed (device reason 0x{reason:X8}).",status);}
         if (status != 0) return false; // A status such as occlusion did not enqueue a frame.
         frameSlotReady = false;

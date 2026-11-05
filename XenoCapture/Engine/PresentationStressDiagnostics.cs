@@ -29,12 +29,16 @@ internal static class PresentationStressDiagnostics
     }
     static long Submit(Direct3DHost host, int index = 0)
     {
-        using var frame = TestSignal.Frame(index, 320, 180); frame.Time = Clock.Now; host.Submit(frame); return frame.Time;
+        using var frame = TestSignal.Frame(index, 320, 180);
+        frame.Time = Clock.Now; frame.Duration = 166_667;
+        host.Submit(frame); return frame.Time;
     }
     public static async Task Run(string folder, bool includeSoak = true, int cycles = 20, PreviewUpscaler upscaler = PreviewUpscaler.Standard)
     {
         Directory.CreateDirectory(folder); int bufferBaseline = Packet.LiveBuffers;
         var checks = new Dictionary<string, object>();
+        CheckSourcePacingPolicy();
+        checks["sourcePacingPolicy"] = "pass";
         void Save() => File.WriteAllText(Path.Combine(folder, "results.json"), JsonSerializer.Serialize(checks, new JsonSerializerOptions { WriteIndented = true }));
         void Stage(string text) => File.WriteAllText(Path.Combine(folder, "stage.txt"), text);
         if (Array.IndexOf(Environment.GetCommandLineArgs(), "--startup-latency-only") >= 0)
@@ -88,16 +92,41 @@ internal static class PresentationStressDiagnostics
                 double resumed = await NextFrame(); checks["pauseAfterReadinessToResumeMs"] = resumed; Save();
                 if (resumed > 70 || host.FrameWaitTimeouts != 0) throw new InvalidOperationException($"Pausing after acquiring readiness starved the resumed frame: {resumed:F1} ms.");
 
-                long empty = host.EmptyWakeups, before = Interlocked.Read(ref presented), replacementTime = 0;
+                long before = Interlocked.Read(ref presented), replacementTime = 0;
                 host.DiagnosticBeforeFrameLatch = () => { host.DiagnosticBeforeFrameLatch = null; replacementTime = Submit(host, 1); };
-                Submit(host); await WaitFor(() => Interlocked.Read(ref presented) > before && host.EmptyWakeups > empty);
+                Submit(host); await WaitFor(() => Interlocked.Read(ref presented) > before);
                 if (Interlocked.Read(ref lastPresentedTime) != replacementTime) throw new InvalidOperationException("The renderer presented a superseded frame after waiting.");
                 checks["latestFrameLatching"] = "pass";
                 double burst = await NextFrame(); checks["replacementDuringWaitToNextPresentMs"] = burst;
                 checks["frameWaitTimeouts"] = host.FrameWaitTimeouts; Save();
                 if (burst > 70 || host.FrameWaitTimeouts != 0) throw new InvalidOperationException($"Replacing the pending frame left a stale notification that stalled the next frame: {burst:F1} ms.");
+
+                long newest = 0, firstAfterDraw = 0;
+                void RecordFirst(PresentedFrame frame) => Interlocked.CompareExchange(ref firstAfterDraw, frame.Time, 0);
+                host.FramePresented += RecordFirst;
+                try
+                {
+                    host.DiagnosticAfterSourceDraw = () =>
+                    {
+                        host.DiagnosticAfterSourceDraw = null;
+                        Thread.Sleep(25);
+                        newest = Submit(host, 2);
+                    };
+                    Submit(host);
+                    await WaitFor(() => Interlocked.Read(ref firstAfterDraw) != 0 || failure != null);
+                    if (failure != null) throw failure;
+                    if (Interlocked.Read(ref firstAfterDraw) != newest)
+                        throw new InvalidOperationException("A slow draw presented the stale capture ahead of its replacement.");
+                    checks["latestFrameAfterSlowDraw"] = "pass";
+                }
+                finally { host.FramePresented -= RecordFirst; }
             }
-            finally { host.DiagnosticBeforeFrameLatch = null; await window.CloseAsync(); }
+            finally
+            {
+                host.DiagnosticBeforeFrameLatch = null;
+                host.DiagnosticAfterSourceDraw = null;
+                await window.CloseAsync();
+            }
         }
         if (!includeSoak)
         {
@@ -208,6 +237,25 @@ internal static class PresentationStressDiagnostics
         }
     }
 
+    static void CheckSourcePacingPolicy()
+    {
+        const long period = 166_667, sourceTime = 1_000_000, arrival = 1_100_000;
+        var pacing = new SourceFramePacing(sourceTime, period, arrival);
+        long early = arrival + period - 30_000;
+        if (pacing.Deadline(sourceTime + period, period, early, 240) != early + 20_000
+            || pacing.Deadline(sourceTime + period, period, early, 60) != early
+            || pacing.Deadline(sourceTime + period, period, early, 360) != early + 13_888)
+            throw new InvalidOperationException("Source pacing did not respect the hold and display limits.");
+
+        long late = arrival + period + 30_000, burst = arrival + period / 2;
+        if (pacing.Deadline(sourceTime + period, period, late, 240) != late
+            || pacing.Deadline(sourceTime + period, period, burst, 240) != burst
+            || pacing.Deadline(sourceTime + period * 2, period, early, 240) != early
+            || pacing.Deadline(sourceTime, period, early, 240) != early
+            || pacing.Deadline(sourceTime + period, period / 2, early, 240) != early)
+            throw new InvalidOperationException("Source pacing held a late frame, burst, or discontinuity.");
+    }
+
     static async Task<Dictionary<string, object>> RunNativePlayback()
     {
         const long period = 166667, arrivalJitter = 30_000;
@@ -229,6 +277,7 @@ internal static class PresentationStressDiagnostics
                         lock (frames) frames.Add((Clock.Now, frame.Time));
                 }
                 host.FramePresented += OnPresent;
+                long initialPacingWaits = host.SourcePacingWaits;
                 var elapsed = Stopwatch.StartNew();
                 try { await Task.Delay(3000); }
                 finally { host.FramePresented -= OnPresent; }
@@ -245,12 +294,23 @@ internal static class PresentationStressDiagnostics
                 {
                     ["fps"] = fps, ["gapDeviationP95Ms"] = At(deviations, .95),
                     ["gapP99Ms"] = At(gaps.Order().ToArray(), .99), ["sampleAgeP50Ms"] = At(ages, .50),
-                    ["sampleAgeP95Ms"] = At(ages, .95), ["frameWaitTimeouts"] = host.FrameWaitTimeouts
+                    ["sampleAgeP95Ms"] = At(ages, .95), ["frameWaitTimeouts"] = host.FrameWaitTimeouts,
+                    ["sourcePacingWaits"] = host.SourcePacingWaits - initialPacingWaits
                 };
             }
             var windowed = await Sample(main.DiagnosticPreview ?? throw new InvalidOperationException("No windowed preview host."));
             await main.DiagnosticFullscreen();
             var fullscreen = main.DiagnosticPreview ?? throw new InvalidOperationException("No fullscreen preview host.");
+            main.DiagnosticSetSourcePacing(false);
+            string immediateSettings = main.DiagnosticSettingsJson;
+            main.DiagnosticSetSourcePacing(true);
+            main.DiagnosticApplySettingsJson(immediateSettings);
+            if (fullscreen.SmoothSourcePacing || main.DiagnosticEmbedded.SmoothSourcePacing)
+                throw new InvalidOperationException("The disabled source pacing setting did not reach both preview hosts.");
+            var immediate = await Sample(fullscreen);
+            if (immediate["sourcePacingWaits"] != 0)
+                throw new InvalidOperationException("Source pacing waited with its setting off.");
+            main.DiagnosticSetSourcePacing(true);
             var standard = await Sample(fullscreen);
 
             main.DiagnosticSelectUpscaler(PreviewUpscaler.Performance);
@@ -262,7 +322,7 @@ internal static class PresentationStressDiagnostics
             var performance = await Sample(fullscreen);
             return new()
             {
-                ["windowed"] = windowed, ["fullscreen"] = standard, ["fullscreenPerformance"] = performance,
+                ["windowed"] = windowed, ["fullscreen"] = standard, ["fullscreenImmediate"] = immediate, ["fullscreenPerformance"] = performance,
                 ["performancePreferenceRoundTrip"] = "pass", ["injectedAlternateDelayMs"] = arrivalJitter / 10000.0,
                 ["measuresMonitorScanout"] = false
             };

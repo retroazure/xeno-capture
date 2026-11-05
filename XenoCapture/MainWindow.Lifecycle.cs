@@ -54,7 +54,11 @@ public partial class MainWindow
         try { await previewRenderer.ReleaseAsync(); } catch (Exception ex) { errors.Add(ex); }
         fullscreen = null; fullscreenPreview = null; VideoHost.Visibility = Visibility.Collapsed;
         try { await inputsAndRecording; } catch (Exception ex) { errors.Add(ex); }
-        if (!closing) { embeddedPreview = NewPreview(); VideoHost.Child = embeddedPreview; }
+        if (!closing)
+        {
+            RestorePreviewAfterPhone();
+            embeddedPreview = NewPreview(); VideoHost.Child = embeddedPreview;
+        }
         EmptyState.Visibility = Visibility.Visible; DemoBadge.Visibility = Visibility.Collapsed;
         SignalTitle.Text = "Preview"; SignalDot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "IdleBrush"); PreviewFormat.Text = "Waiting for a signal";
         lastFrameAt = 0; previousFrames = System.Threading.Interlocked.Read(ref receivedFrames); previousPresented = System.Threading.Interlocked.Read(ref presentedFrames);

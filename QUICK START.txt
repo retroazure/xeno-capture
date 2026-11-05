@@ -23,6 +23,11 @@ Connect one Android phone, unlock it, and enable USB debugging under
 Developer options. In Xeno Capture, open Input > Phone screen and select
 Play Android over USB. Approve the debugging request on the phone if shown.
 Leave Always allow from this computer unchecked for temporary approval.
+
+Responsive is the default for older phones, up to 1280 px and 30 FPS.
+Choose Smooth for up to 60 FPS at that size or High detail for up to
+1920 px and 60 FPS. AI upscaling starts off for each phone connection.
+
 Android USB keeps the scrcpy helper off-screen while Xeno shows the preview.
 For live sound on Android 11 or newer, check Phone output before clicking
 Play. This routes the phone's sound to the Windows playback output.
@@ -31,6 +36,7 @@ Disconnect in Xeno Capture when finished, then turn off USB debugging on
 the phone if you no longer need it. Keep the android folder beside the app.
 
 EXPERIMENTAL AI UPSCALING (preview only, off by default)
+The app starts with Preview upscaling > Standard · Fast scaling.
 Output > AI Video Super Resolution > enable the switch.
 Choose Auto, 720p, 1080p, 1440p or 4K processing, then Performance,
 Balanced, High or Ultra quality. High is the starting quality.
@@ -43,16 +49,27 @@ It temporarily takes priority over Standard / Normal / RTX Video.
 Turning it off restores your selection. Recording/audio are independent.
 First use initializes the model. Higher quality/resolution costs GPU work.
 
-Fullscreen smooths short bursts of early source frames even with generation
-off. An early frame can wait up to 2 ms. Late frames proceed immediately.
+With frame generation off, the preview uses the next available display
+slot and selects the latest capture, including after a fullscreen resize.
+Smooth source pacing is on by default. On displays with at least twice
+the capture rate, it can hold an early frame for up to 2 ms. Turn it off
+under Output for immediate presentation.
+Choose Frame generation > Gap recovery to fill isolated late-frame gaps
+with one predicted image. It needs display refresh of at least twice the
+capture rate and supports up to 1080p input.
 
 EXPERIMENTAL FRAME GENERATION (preview only, off by default)
-To test smoother motion, choose Adaptive 2x, 3x or 4x frame generation.
+Choose Predictive 60, 120 or 180 FPS to try motion prediction. Fresh
+captures take priority and prediction fills spare display slots without
+waiting for a future frame. The screen refresh and GPU limit the rate.
+For sharper enlarged video, choose Preview upscaling > Normal.
+
+Choose Adaptive 2x, 3x or 4x for buffered interpolation.
 Leave Force 30 FPS game cadence off for automatic content detection.
 30 FPS games target 60 / 90 / 120 FPS; 60 FPS games target 120 / 180 / 240.
 The screen must support the target, and the GPU must finish processing
 within that interval. The counter separates shown, generated and input FPS.
-Generation adds one content frame of buffering. Motion checks preserve
+Adaptive interpolation adds one content frame of buffering. Motion checks preserve
 source frames on scene cuts and suppress interpolation when too much
 high-contrast motion cannot be matched.
 

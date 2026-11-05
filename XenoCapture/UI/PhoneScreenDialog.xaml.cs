@@ -6,11 +6,12 @@ namespace XenoCapture.UI;
 public partial class PhoneScreenDialog : Window
 {
     internal bool PlayPhoneAudio => PhoneAudio.IsChecked == true;
+    internal AndroidPreviewProfile SelectedProfile => (AndroidPreviewProfile)PreviewProfile.SelectedIndex;
 
     internal PhoneScreenDialog(bool captureAvailable)
     {
         InitializeComponent();
-        PhoneAudio.IsEnabled = PlayAndroidUsb.IsEnabled = captureAvailable && AndroidUsbCaptureBackend.IsPackaged;
+        PreviewProfile.IsEnabled = PhoneAudio.IsEnabled = PlayAndroidUsb.IsEnabled = captureAvailable && AndroidUsbCaptureBackend.IsPackaged;
         if (!PlayAndroidUsb.IsEnabled)
             AndroidUsbHint.Text = "Android USB preview needs Windows Graphics Capture and the verified Android helper beside XenoCapture.exe.";
     }

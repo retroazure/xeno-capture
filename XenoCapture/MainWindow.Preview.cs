@@ -17,6 +17,7 @@ public partial class MainWindow
             Sharpness = Sharpness.Value,
             Upscaler = SelectedUpscaler,
             FrameGeneration = SelectedFrameGeneration,
+            SmoothSourcePacing = SelectedSourcePacing,
             Capped30Game = SelectedCapped30Game,
             AiVideo = SelectedAiVideo,
             EdgeSmoothing = isFullscreen && FullscreenEdgeSmoothing.IsChecked == true
@@ -80,12 +81,20 @@ public partial class MainWindow
     static double Meter(double v) => v < 0.001 ? 0 : Math.Clamp((20 * Math.Log10(v) + 60) / 60, 0, 1);
     static string Db(double v) => v < 0.001 ? "−∞ dB" : $"{20 * Math.Log10(v):0} dB";
 
-    FrameGenerationMode SelectedFrameGeneration => PreviewFrameGeneration?.SelectedIndex switch
-    { 1 => FrameGenerationMode.Adaptive2x, 2 => FrameGenerationMode.Adaptive3x, 3 => FrameGenerationMode.Adaptive4x, _ => FrameGenerationMode.Off };
+    FrameGenerationMode SelectedFrameGeneration =>
+        PreviewFrameGeneration?.SelectedIndex is >= 0 and <= (int)FrameGenerationMode.RecoverGaps
+            ? (FrameGenerationMode)PreviewFrameGeneration.SelectedIndex : FrameGenerationMode.Off;
     void FrameGenerationChanged(object sender, SelectionChangedEventArgs e)
     {
         if (embeddedPreview != null) embeddedPreview.FrameGeneration = SelectedFrameGeneration;
         if (fullscreenPreview != null) fullscreenPreview.FrameGeneration = SelectedFrameGeneration;
+        UpdateUpscalingStatus(); if (IsLoaded) SaveSettings();
+    }
+    bool SelectedSourcePacing => SourcePacingToggle?.IsChecked == true;
+    void SourcePacingChanged(object sender, RoutedEventArgs e)
+    {
+        if (embeddedPreview != null) embeddedPreview.SmoothSourcePacing = SelectedSourcePacing;
+        if (fullscreenPreview != null) fullscreenPreview.SmoothSourcePacing = SelectedSourcePacing;
         UpdateUpscalingStatus(); if (IsLoaded) SaveSettings();
     }
     bool SelectedCapped30Game => Capped30GameToggle?.IsChecked==true;
@@ -131,7 +140,9 @@ public partial class MainWindow
     }
     void UpdateUpscalingStatus()
     {
-        if (FrameGenerationHint != null) FrameGenerationHint.Text = SelectedFrameGeneration == FrameGenerationMode.Off ? "Off · lowest preview delay" : activePreview?.FrameGenerationStatus ?? "Waiting for video · adds one frame of delay";
+        if (FrameGenerationHint != null) FrameGenerationHint.Text = SelectedFrameGeneration == FrameGenerationMode.Off
+            ? (SelectedSourcePacing ? "Off · smooth source pacing enabled" : "Off · lowest preview delay")
+            : activePreview?.FrameGenerationStatus ?? FrameGenerationPolicy.WaitingStatus(SelectedFrameGeneration);
         bool aiEnabled=SelectedAiVideo.Enabled;
         if(AiVideoHint!=null)AiVideoHint.Text=aiEnabled ? !Connected?"Waiting for video · AI preview only":activePreview?.AiVideoStatus??"Waiting for video · AI preview only":"Off · uses the selected preview filter";
         bool performance = SelectedUpscaler == PreviewUpscaler.Performance && !aiEnabled;

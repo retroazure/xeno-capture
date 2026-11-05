@@ -18,6 +18,13 @@ internal static class FrameGenerationDiagnostics
     public static async Task Run(string folder, bool soak = false)
     {
         Directory.CreateDirectory(folder);
+        if (Array.IndexOf(Environment.GetCommandLineArgs(), "--gap-recovery-only") >= 0)
+        {
+            var recovery = await RunGapRecoveryUi();
+            recovery["result"] = "PASS";
+            await File.WriteAllTextAsync(Path.Combine(folder, "results.json"), JsonSerializer.Serialize(recovery));
+            return;
+        }
         if(Array.IndexOf(Environment.GetCommandLineArgs(),"--high-rate-only")>=0)
         {
             var rate=await RunHighRateUi(folder);rate["result"]="PASS";
@@ -27,6 +34,7 @@ internal static class FrameGenerationDiagnostics
         if (Array.IndexOf(Environment.GetCommandLineArgs(), "--gpu-only") < 0)
         {
             foreach (var item in await RunUi(folder, soak ? 20 : 0)) results[item.Key] = item.Value;
+            foreach (var item in await RunGapRecoveryUi()) results[item.Key] = item.Value;
             foreach (var item in await RunHighRateUi(folder)) results[item.Key] = item.Value;
         }
         results["result"] = "PASS";
@@ -53,6 +61,7 @@ internal static class FrameGenerationDiagnostics
         var checks = new Dictionary<string, object>();
         CheckHighRateCadence();
         checks["adaptiveHighRateCadence"] = "pass";
+        CheckPrediction(checks);
         using var first = Pattern(0); using var second = Pattern(16); using var expected = Pattern(8);
         first.Time = Clock.Now; second.Time = first.Time + 333333; expected.Time = first.Time + 166667;
         using (var renderer = new D3DPreview(0, 640, 360) { DisableFrameBudgetForDiagnostics = true })
@@ -217,6 +226,25 @@ internal static class FrameGenerationDiagnostics
                 Require(generated > 10, "The live test only repeated frames and did not interpolate motion.");
             }
             finally { host.FramePresented -= OnPresent; }
+
+            main.DiagnosticSelectFrameGeneration(FrameGenerationMode.Predictive60);
+            await Wait(() => host.FrameGenerationActive && host.FrameGenerationStatus.Contains("no frame buffering", StringComparison.Ordinal));
+            long sources = 0, predictions = 0;
+            void CountPrediction(PresentedFrame frame)
+            {
+                if (frame.Kind == PresentationKind.Source) Interlocked.Increment(ref sources);
+                if (frame.Kind == PresentationKind.Predicted) Interlocked.Increment(ref predictions);
+            }
+            host.FramePresented += CountPrediction;
+            var predictiveSample = Stopwatch.StartNew();
+            try { await Task.Delay(2000); }
+            finally { host.FramePresented -= CountPrediction; }
+            double sourceFps = Interlocked.Read(ref sources) / predictiveSample.Elapsed.TotalSeconds;
+            double predictionFps = Interlocked.Read(ref predictions) / predictiveSample.Elapsed.TotalSeconds;
+            checks["predictiveSourceFps"] = sourceFps;
+            checks["predictiveGeneratedFps"] = predictionFps;
+            Require(sourceFps > 26 && predictionFps > 5, "Prediction did not fill spare slots while keeping the source cadence.");
+
             main.DiagnosticSelectFrameGeneration(FrameGenerationMode.Off);
             await Wait(() => main.DiagnosticPreview?.FrameGenerationActive == false);
             Require(main.DiagnosticEmbedded.FrameGeneration == FrameGenerationMode.Off, "Off did not reach the windowed host.");
@@ -262,6 +290,72 @@ internal static class FrameGenerationDiagnostics
             foreach (var item in await RunMultiplierUi(folder,multiplier,cycles > 0 ? 6 : 2)) checks[item.Key] = item.Value;
         return checks;
     }
+    static async Task<Dictionary<string, object>> RunGapRecoveryUi()
+    {
+        var source = new FrameGenerationTestSource(60, dropEvery: 8);
+        var main = new MainWindow(false, false, (_, _) => new CaptureStream(() => source, TimeSpan.FromSeconds(2)))
+            { ShowActivated = false };
+        var checks = new Dictionary<string, object>();
+        main.Show();
+        try
+        {
+            main.DiagnosticPrepareInput();
+            await main.DiagnosticConnectFullscreen(fastestMonitor: true);
+            var host = main.DiagnosticPreview!;
+            double refresh = DisplayTiming.RefreshRate(host.Handle);
+            checks["gapRecoveryRefreshHz"] = refresh;
+            if (!SourceFramePacing.HasRefreshHeadroom(refresh, 166_666))
+            {
+                checks["gapRecovery"] = "not exercised: display refresh below requirement";
+                return checks;
+            }
+            async Task<(double LongGapsPerSecond, double SourceFps, double PredictedFps)> Sample()
+            {
+                await Task.Delay(400);
+                long previous = 0;
+                int longGaps = 0, sources = 0, predictions = 0;
+                var gate = new object();
+                void Count(PresentedFrame frame)
+                {
+                    if (frame.Kind is not (PresentationKind.Source or PresentationKind.Predicted)) return;
+                    lock (gate)
+                    {
+                        long now = Clock.Now;
+                        if (previous != 0 && now - previous > 270_000) longGaps++;
+                        previous = now;
+                        if (frame.Kind == PresentationKind.Source) sources++;
+                        else predictions++;
+                    }
+                }
+                host.FramePresented += Count;
+                var watch = Stopwatch.StartNew();
+                try { await Task.Delay(3000); }
+                finally { host.FramePresented -= Count; }
+                double seconds = watch.Elapsed.TotalSeconds;
+                lock (gate) return (longGaps / seconds, sources / seconds, predictions / seconds);
+            }
+
+            var baseline = await Sample();
+            main.DiagnosticSelectFrameGeneration(FrameGenerationMode.RecoverGaps);
+            string saved = main.DiagnosticSettingsJson;
+            main.DiagnosticSelectFrameGeneration(FrameGenerationMode.Off);
+            main.DiagnosticApplySettingsJson(saved);
+            Require(host.FrameGeneration == FrameGenerationMode.RecoverGaps, "The gap recovery setting did not restore.");
+            var recovered = await Sample();
+            Require(baseline.PredictedFps == 0 && recovered.PredictedFps > 2 && recovered.PredictedFps < 10,
+                "Gap recovery did not selectively fill missing frames.");
+            Require(recovered.SourceFps > 48 && recovered.LongGapsPerSecond < baseline.LongGapsPerSecond * .85,
+                $"Gap recovery did not reduce long gaps while preserving source delivery ({baseline.LongGapsPerSecond:F1} to {recovered.LongGapsPerSecond:F1}/s).");
+            checks["gapRecovery"] = new
+            {
+                baselineLongGapsPerSecond = baseline.LongGapsPerSecond, recoveryLongGapsPerSecond = recovered.LongGapsPerSecond,
+                baselineSourceFps = baseline.SourceFps, recoverySourceFps = recovered.SourceFps, predictedFps = recovered.PredictedFps
+            };
+            return checks;
+        }
+        finally { await main.DiagnosticClose().WaitAsync(TimeSpan.FromSeconds(5)); }
+    }
+
     static async Task<Dictionary<string,object>> RunMultiplierUi(string folder, int multiplier, int cycles)
     {
         var checks = new Dictionary<string,object>(); var source = new FrameGenerationTestSource(60 / multiplier);
@@ -354,6 +448,60 @@ internal static class FrameGenerationDiagnostics
         finally{await main.DiagnosticClose().WaitAsync(TimeSpan.FromSeconds(5));}
         return checks;
     }
+    static void CheckPrediction(Dictionary<string, object> checks)
+    {
+        const long period = 333_333;
+        foreach (var (mode, target) in new[] { (FrameGenerationMode.Predictive60, 60), (FrameGenerationMode.Predictive120, 120), (FrameGenerationMode.Predictive180, 180) })
+        {
+            Require(FrameGenerationPolicy.PredictiveTarget(mode) == target && FrameGenerationPolicy.Multiplier(mode) == 1,
+                "Predictive modes must retain their saved targets and use a separate cadence.");
+            Require(Math.Abs(FrameGenerationPolicy.PredictionInterval(target, 240, period) * target - 10_000_000) <= target / 2,
+                "Prediction did not schedule the requested target.");
+        }
+        Require(FrameGenerationPolicy.PredictionInterval(180, 120, period) == 83_333
+            && FrameGenerationPolicy.PredictionInterval(120, 60, 166_667) == 0,
+            "Prediction exceeded the monitor refresh rate or invented slots at native cadence.");
+
+        using var renderer = new D3DPreview(0, 640, 360);
+        using var first = Pattern(0);
+        using var second = Pattern(16);
+        using var expected = Pattern(24);
+        first.Time = Clock.Now;
+        second.Time = first.Time + period;
+        Require(renderer.CachePredictionSource(first, period, false) && !renderer.BeginPrediction(),
+            "Prediction used motion before it had two captures.");
+        Require(renderer.CachePredictionSource(second, period, false), "The newest capture could not be cached.");
+        renderer.RenderCachedFrame(0, PreviewUpscaler.Standard);
+        Require(second.Bytes.AsSpan(0, second.Length).SequenceEqual(renderer.Readback()),
+            "Prediction changed the newest real image.");
+
+        bool MotionReady()
+        {
+            var wait = Stopwatch.StartNew();
+            bool? ready;
+            while ((ready = renderer.PredictionReady()) == null && wait.ElapsedMilliseconds < 2000)
+                Thread.Sleep(1);
+            Require(ready != null, "Prediction analysis did not complete.");
+            return ready == true;
+        }
+
+        Require(renderer.BeginPrediction() && MotionReady(), "The motion fixture could not be predicted.");
+        var frame = renderer.RenderPrediction(period / 2, period / 2, 0, PreviewUpscaler.Standard);
+        var image = renderer.Readback();
+        double predictionError = Error(image, expected.Bytes), sourceError = Error(second.Bytes, expected.Bytes);
+        Require(frame.Kind == PresentationKind.Predicted && frame.Time == second.Time + period / 2 && predictionError < sourceError * .8,
+            $"Prediction did not approach the known future image ({predictionError:F2} vs {sourceError:F2}).");
+        for (int y = 30; y < 68; y++)
+            Require(image.AsSpan((y * 640 + 40) * 4, 160 * 4).SequenceEqual(second.Bytes.AsSpan((y * 640 + 40) * 4, 160 * 4)),
+                "Prediction moved static HUD pixels.");
+
+        using var cut = new Packet(640 * 360 * 4, width: 640, height: 360) { Time = second.Time + period, Duration = period };
+        cut.Bytes.AsSpan(0, cut.Length).Fill(255);
+        Require(renderer.CachePredictionSource(cut, period, false) && renderer.BeginPrediction() && !MotionReady(),
+            "Prediction accepted an abrupt scene cut.");
+        checks["predictivePreview"] = new { predictionError, sourceError, staticHud = "pass", sceneCut = "pass" };
+    }
+
     static double Error(byte[] image, byte[] expected)
     {
         long sum = 0, count = 0;

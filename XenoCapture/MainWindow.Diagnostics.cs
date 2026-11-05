@@ -34,6 +34,7 @@ public partial class MainWindow
     internal bool DiagnosticCapped30Game => SelectedCapped30Game;
     internal void DiagnosticSelectCapped30Game(bool enabled) => Capped30GameToggle.IsChecked=enabled;
     internal FrameGenerationMode DiagnosticFrameGeneration => SelectedFrameGeneration;
+    internal void DiagnosticSetSourcePacing(bool enabled) => SourcePacingToggle.IsChecked = enabled;
     internal void DiagnosticSelectFrameGeneration(FrameGenerationMode mode) => PreviewFrameGeneration.SelectedIndex = (int)mode;
     internal PreviewUpscaler DiagnosticUpscaler => SelectedUpscaler;
     internal XenoCapture.UI.Direct3DHost DiagnosticEmbedded => embeddedPreview;
@@ -97,6 +98,38 @@ public partial class MainWindow
     internal string? DiagnosticRecordingPath => lastRecording;
     internal void DiagnosticStaleFrame(int session, Packet frame) => OnData(session, frame, 2);
     internal void DiagnosticStaleFailure(int session) => ReportInputFailure(session, new InvalidOperationException("Late diagnostic callback"));
+
+    internal static async Task CheckPhonePreviewDefaults()
+    {
+        var window = new MainWindow(false, false, null);
+        try
+        {
+            window.DiagnosticSelectUpscaler(PreviewUpscaler.RtxVideo);
+            window.DiagnosticSelectAiVideo(true, 1080, 3);
+            window.ApplyStartupPreferences(window.CurrentPreferences());
+            if (window.SelectedAiVideo != new AiVideoSettings(false, 1080, 3)
+                || window.embeddedPreview.AiVideo.Enabled || window.SelectedUpscaler != PreviewUpscaler.Standard
+                || window.embeddedPreview.Upscaler != PreviewUpscaler.Standard)
+                throw new InvalidOperationException("Startup did not use Standard scaling with AI upscaling off.");
+
+            window.DiagnosticSelectUpscaler(PreviewUpscaler.Enhanced);
+            window.DiagnosticSelectAiVideo(true, 1080, 3);
+            window.ApplyPhonePreviewDefaults();
+            if (window.SelectedAiVideo.Enabled || window.embeddedPreview.AiVideo.Enabled
+                || window.SelectedUpscaler != PreviewUpscaler.Standard || window.embeddedPreview.Upscaler != PreviewUpscaler.Standard)
+                throw new InvalidOperationException("Phone preview inherited AI upscaling from another input.");
+            var saved = window.CurrentPreferences();
+            if (!saved.AiEnabled || saved.Upscaling != (int)PreviewUpscaler.Enhanced)
+                throw new InvalidOperationException("Phone preview overwrote the saved upscaling preferences.");
+            window.DiagnosticSelectAiVideo(true, 1080, 3);
+            if (!window.embeddedPreview.AiVideo.Enabled)
+                throw new InvalidOperationException("Phone AI upscaling could not be enabled manually.");
+            window.RestorePreviewAfterPhone();
+            if (!window.SelectedAiVideo.Enabled || window.SelectedUpscaler != PreviewUpscaler.Enhanced)
+                throw new InvalidOperationException("Disconnect did not restore the previous upscaling settings.");
+        }
+        finally { await window.DiagnosticClose().WaitAsync(TimeSpan.FromSeconds(5)); }
+    }
 
     internal static async Task CheckAppearance(string folder)
     {

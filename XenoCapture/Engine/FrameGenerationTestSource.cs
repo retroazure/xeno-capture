@@ -2,11 +2,11 @@ using System;
 using System.Threading;
 
 namespace XenoCapture.Engine;
-internal sealed class FrameGenerationTestSource(int framesPerSecond = 30, int gameFramesPerSecond = 0) : ICaptureBackend
+internal sealed class FrameGenerationTestSource(int framesPerSecond = 30, int gameFramesPerSecond = 0, int dropEvery = 0) : ICaptureBackend
 {
     readonly object gate = new(); readonly AutoResetEvent stopped = new(false);
     FrameDeadlineWaiter? timer; bool disposed; volatile bool stopping;
-    long next, origin, frames, uniqueFrames, lastGameIndex, heldGameIndex;
+    long next, origin, frames, uniqueFrames, lastGameIndex, heldGameIndex, nextSlot;
     int holdMotion, pauseFrames; bool holding;
     internal bool HoldMotion { get => Volatile.Read(ref holdMotion)!=0; set => Volatile.Write(ref holdMotion,value ? 1:0); }
     internal bool PauseFrames { get => Volatile.Read(ref pauseFrames)!=0; set => Volatile.Write(ref pauseFrames,value ? 1:0); }
@@ -25,7 +25,9 @@ internal sealed class FrameGenerationTestSource(int framesPerSecond = 30, int ga
         if (HoldMotion) { if (!holding) heldGameIndex=gameIndex; gameIndex=heldGameIndex; holding=true; } else holding=false;
         if (gameIndex!=lastGameIndex) Interlocked.Increment(ref uniqueFrames); lastGameIndex=gameIndex;
         var packet = FrameGenerationDiagnostics.Pattern((int)(gameIndex * 16 % 640));
-        packet.Time = origin + (index - 1) * period; packet.Duration = period; next = Math.Max(origin + index * period, Clock.Now);
+        packet.Time = origin + nextSlot++ * period;
+        if (dropEvery > 1 && nextSlot % dropEvery == dropEvery - 1) nextSlot++;
+        packet.Duration = period; next = Math.Max(origin + nextSlot * period, Clock.Now);
         return packet;
     }
     public void Shutdown() { lock (gate) { if (!disposed) { stopping = true; stopped.Set(); } } }
