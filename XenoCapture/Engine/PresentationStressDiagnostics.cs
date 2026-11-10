@@ -63,6 +63,15 @@ internal static class PresentationStressDiagnostics
             Save();
             return;
         }
+        if (Array.IndexOf(Environment.GetCommandLineArgs(), "--ai-motion-pacing") >= 0)
+        {
+            Stage("4K Ultra fullscreen motion pacing");
+            checks["aiMotionPlayback"] = await RunNativePlayback(aiMotion: true);
+            checks["result"] = "PASS";
+            Stage("complete");
+            Save();
+            return;
+        }
         Stage("readiness race regressions");
         using (var host = new Direct3DHost { Active = true })
         {
@@ -177,7 +186,7 @@ internal static class PresentationStressDiagnostics
         main.Show();
         try
         {
-            main.DiagnosticSelectUpscaler(upscaler); main.DiagnosticPrepareInput(); await main.DiagnosticConnectFullscreen(maximize: upscaler == PreviewUpscaler.Enhanced);
+            main.DiagnosticSelectUpscaler(upscaler); main.DiagnosticPrepareInput(); await main.DiagnosticConnectFullscreen(fastestMonitor: true);
             await Sample("initial fullscreen", 8);
             int baselineHandles = Process.GetCurrentProcess().HandleCount;
 
@@ -188,7 +197,7 @@ internal static class PresentationStressDiagnostics
                 // Also resize the retained embedded swap chain between trips.
                 main.Width = cycle % 2 == 0 ? 1160 : 1000;
                 main.Height = cycle % 2 == 0 ? 800 : 700;
-                await main.DiagnosticFullscreen(); await Sample($"fullscreen {cycle + 1}", 2);
+                await main.DiagnosticFullscreen(fastestMonitor: true); await Sample($"fullscreen {cycle + 1}", 2);
             }
             await main.DiagnosticWindowed(); await Sample("final windowed", 8);
             int finalHandles = Process.GetCurrentProcess().HandleCount;
@@ -204,7 +213,7 @@ internal static class PresentationStressDiagnostics
         foreach (var item in source.CadenceStats()) checks[item.Key] = item.Value;
         checks["mediaWorkersAfterClose"] = MediaFoundationUsage.ActiveWorkers; checks["mmcssRegistrationsAfterClose"] = MultimediaScheduling.ActiveRegistrations;
         if (MultimediaScheduling.FailedReverts != 0) throw new InvalidOperationException("MMCSS failed to release a preview/capture thread registration.");
-        checks["usesPhysicalCaptureCard"] = false; checks["measuresMonitorScanout"] = false; checks["syntheticInput"] = $"{sourceWidth}x{sourceHeight} NV12 at 60 FPS"; checks["previewUpscaler"] = upscaler.ToString(); checks["enhancedFrames"] = System.Threading.Interlocked.Read(ref enhancedFrames);
+        checks["usesPhysicalCaptureCard"] = false; checks["measuresPhysicalPixelResponse"] = false; checks["syntheticInput"] = $"{sourceWidth}x{sourceHeight} NV12 at 60 FPS"; checks["previewUpscaler"] = upscaler.ToString(); checks["enhancedFrames"] = System.Threading.Interlocked.Read(ref enhancedFrames);
         if (upscaler == PreviewUpscaler.Enhanced && enhancedFrames == 0) throw new InvalidOperationException("The enhanced presentation soak never ran its upscaling pipeline.");
         checks["result"] = "PASS"; Stage("complete"); Save();
     }
@@ -244,7 +253,8 @@ internal static class PresentationStressDiagnostics
         long early = arrival + period - 30_000;
         if (pacing.Deadline(sourceTime + period, period, early, 240) != early + 20_000
             || pacing.Deadline(sourceTime + period, period, early, 60) != early
-            || pacing.Deadline(sourceTime + period, period, early, 360) != early + 13_888)
+            || pacing.Deadline(sourceTime + period, period, early, 360) != early + 13_888
+            || pacing.Deadline(sourceTime + period, period, early, 180, useDisplayBudget: true) != early + 30_000)
             throw new InvalidOperationException("Source pacing did not respect the hold and display limits.");
 
         long late = arrival + period + 30_000, burst = arrival + period / 2;
@@ -254,52 +264,126 @@ internal static class PresentationStressDiagnostics
             || pacing.Deadline(sourceTime, period, early, 240) != early
             || pacing.Deadline(sourceTime + period, period / 2, early, 240) != early)
             throw new InvalidOperationException("Source pacing held a late frame, burst, or discontinuity.");
+
+        const long lastDisplayed = arrival + 35_000, nextArrival = arrival + period - 30_000;
+        if (pacing.DisplayDeadline(sourceTime + period, period, nextArrival, 240, lastDisplayed) != arrival + 163_500
+            || pacing.DisplayDeadline(sourceTime + period, period, nextArrival, 180, arrival + 55_000) != arrival + 169_611
+            || pacing.DisplayDeadline(sourceTime + period, period, nextArrival, 180, arrival + 55_000, drawAhead: true) != arrival + 180_000
+            || pacing.DisplayDeadline(sourceTime + period, period, nextArrival, 144, lastDisplayed) != null
+            || pacing.DisplayDeadline(sourceTime + period, period, nextArrival, 240, arrival - 1) != null
+            || pacing.DisplayDeadline(sourceTime + period, period, late, 240, lastDisplayed) != late
+            || pacing.DisplayDeadline(sourceTime + period, period, late, 180, arrival + 90_000) != arrival + 204_611
+            || pacing.DisplayDeadline(sourceTime + period, period, early, 180, arrival + 65_000) != arrival + 179_611
+            || pacing.DisplayDeadline(sourceTime + period, period, early, 180, arrival + 80_000) != early)
+            throw new InvalidOperationException("Display pacing did not respect the refresh phase or hold limit.");
     }
 
-    static async Task<Dictionary<string, object>> RunNativePlayback()
+    static async Task<Dictionary<string, object>> RunNativePlayback(bool aiMotion = false)
     {
         const long period = 166667, arrivalJitter = 30_000;
-        var source = new PacedVideoBackend(1920, 1080, arrivalJitter);
+        var source = new PacedVideoBackend(1920, 1080, arrivalJitter, pan: aiMotion);
         var main = new MainWindow(false, false, (_, _) => new CaptureStream(() => source, TimeSpan.FromSeconds(2)))
             { ShowActivated = false };
         main.Show();
         try
         {
             main.DiagnosticPrepareInput();
-            await main.DiagnosticConnect();
+            if (aiMotion)
+            {
+                main.DiagnosticSelectAiVideo(true, 2160, 4);
+                main.DiagnosticSelectFrameGeneration(FrameGenerationMode.RecoverGaps);
+                await main.DiagnosticConnectFullscreen(fastestMonitor: true);
+                await WaitFor(() => main.DiagnosticPreview?.AiVideoActive == true);
+            }
+            else await main.DiagnosticConnect();
             async Task<Dictionary<string, double>> Sample(Direct3DHost host)
             {
                 await Task.Delay(350);
                 var frames = new List<(long At, long Time)>();
+                var displayed = new List<(uint Present, uint Refresh)>();
+                void OnDisplay(uint present, uint refresh)
+                {
+                    lock (frames)
+                    {
+                        if (displayed.Count == 0 || displayed[^1].Present != present)
+                            displayed.Add((present, refresh));
+                    }
+                }
                 void OnPresent(PresentedFrame frame)
                 {
                     if (frame.Kind == PresentationKind.Source)
                         lock (frames) frames.Add((Clock.Now, frame.Time));
                 }
                 host.FramePresented += OnPresent;
+                host.DiagnosticDisplayFrame += OnDisplay;
                 long initialPacingWaits = host.SourcePacingWaits;
                 var elapsed = Stopwatch.StartNew();
-                try { await Task.Delay(3000); }
-                finally { host.FramePresented -= OnPresent; }
+                try { await Task.Delay(aiMotion ? 6000 : 3000); }
+                finally
+                {
+                    host.FramePresented -= OnPresent;
+                    host.DiagnosticDisplayFrame -= OnDisplay;
+                }
                 (long At, long Time)[] sample;
-                lock (frames) sample = frames.ToArray();
+                double[] refreshGaps;
+                int displaySamples;
+                double refreshHz = DisplayTiming.RefreshRate(host.Handle);
+                lock (frames)
+                {
+                    sample = frames.ToArray();
+                    displaySamples = displayed.Count;
+                    refreshGaps = displayed.Zip(displayed.Skip(1), (a, b) =>
+                            unchecked(b.Present - a.Present) == 1 ? unchecked(b.Refresh - a.Refresh) : 0)
+                        .Where(gap => gap > 0 && gap <= refreshHz)
+                        .Select(gap => (double)gap).Order().ToArray();
+                }
                 double fps = sample.Length / elapsed.Elapsed.TotalSeconds;
-                if (fps < 55 || host.GeneratedPresentations != 0)
+                if (fps < 55 || (!aiMotion && host.GeneratedPresentations != 0))
                     throw new InvalidOperationException($"Native preview was not presenting the captured source at 60 FPS ({fps:F2}).");
                 var gaps = sample.Zip(sample.Skip(1), (a, b) => (b.At - a.At) / 10000.0).ToArray();
                 var ages = sample.Select(frame => (frame.At - frame.Time) / 10000.0).Order().ToArray();
                 var deviations = gaps.Select(gap => Math.Abs(gap - period / 10000.0)).Order().ToArray();
                 double At(double[] sorted, double percentile) => sorted[(int)((sorted.Length - 1) * percentile)];
-                return new()
+                var report = new Dictionary<string, double>
                 {
                     ["fps"] = fps, ["gapDeviationP95Ms"] = At(deviations, .95),
+                    ["sourcePresentations"] = sample.Length,
+                    ["missingSourceFrames"] = sample.Zip(sample.Skip(1), (a, b) =>
+                        Math.Max(0, Math.Round((b.Time - a.Time) / (double)period) - 1)).Sum(),
                     ["gapP99Ms"] = At(gaps.Order().ToArray(), .99), ["sampleAgeP50Ms"] = At(ages, .50),
                     ["sampleAgeP95Ms"] = At(ages, .95), ["frameWaitTimeouts"] = host.FrameWaitTimeouts,
-                    ["sourcePacingWaits"] = host.SourcePacingWaits - initialPacingWaits
+                    ["sourcePacingWaits"] = host.SourcePacingWaits - initialPacingWaits,
+                    ["displayRefreshHz"] = refreshHz,
+                    ["dxgiDisplaySamples"] = displaySamples,
+                    ["dxgiRefreshGapSamples"] = refreshGaps.Length
+                };
+                // Windowed and mixed-monitor paths can return sparse DXGI samples.
+                if (refreshGaps.Length >= sample.Length * .75)
+                {
+                    int expected = (int)Math.Round(refreshHz * period / 10_000_000);
+                    report["dxgiRefreshGapP50"] = At(refreshGaps, .50);
+                    report["dxgiRefreshGapP95"] = At(refreshGaps, .95);
+                    report["dxgiRefreshGapP99"] = At(refreshGaps, .99);
+                    report["dxgiNearestCadencePercent"] = 100.0 * refreshGaps.Count(gap => gap == expected) / refreshGaps.Length;
+                }
+                return report;
+            }
+            if (aiMotion)
+            {
+                var aiHost = main.DiagnosticPreview ?? throw new InvalidOperationException("No fullscreen AI preview host.");
+                var displayBounds = System.Windows.Forms.Screen.FromHandle(aiHost.Handle).Bounds;
+                var sample = await Sample(aiHost);
+                if (!aiHost.AiVideoActive)
+                    throw new InvalidOperationException("AI video became unavailable during the motion sample.");
+                return new()
+                {
+                    ["fullscreenWidth"] = displayBounds.Width, ["fullscreenHeight"] = displayBounds.Height,
+                    ["aiVideo"] = aiHost.AiVideoStatus, ["injectedAlternateDelayMs"] = arrivalJitter / 10000.0,
+                    ["fullscreen"] = sample
                 };
             }
             var windowed = await Sample(main.DiagnosticPreview ?? throw new InvalidOperationException("No windowed preview host."));
-            await main.DiagnosticFullscreen();
+            await main.DiagnosticFullscreen(fastestMonitor: true);
             var fullscreen = main.DiagnosticPreview ?? throw new InvalidOperationException("No fullscreen preview host.");
             main.DiagnosticSetSourcePacing(false);
             string immediateSettings = main.DiagnosticSettingsJson;
@@ -320,22 +404,25 @@ internal static class PresentationStressDiagnostics
             if (main.DiagnosticUpscaler != PreviewUpscaler.Performance || fullscreen.Upscaler != PreviewUpscaler.Performance)
                 throw new InvalidOperationException("The Performance setting did not restore to the live preview.");
             var performance = await Sample(fullscreen);
+            var bounds = System.Windows.Forms.Screen.FromHandle(fullscreen.Handle).Bounds;
             return new()
             {
+                ["fullscreenWidth"] = bounds.Width, ["fullscreenHeight"] = bounds.Height,
                 ["windowed"] = windowed, ["fullscreen"] = standard, ["fullscreenImmediate"] = immediate, ["fullscreenPerformance"] = performance,
                 ["performancePreferenceRoundTrip"] = "pass", ["injectedAlternateDelayMs"] = arrivalJitter / 10000.0,
-                ["measuresMonitorScanout"] = false
+                ["measuresPhysicalPixelResponse"] = false
             };
         }
         finally { await main.DiagnosticClose().WaitAsync(TimeSpan.FromSeconds(5)); }
     }
-    sealed class PacedVideoBackend(int width, int height, long arrivalJitter = 0) : ICaptureBackend
+    sealed class PacedVideoBackend(int width, int height, long arrivalJitter = 0, bool pan = false) : ICaptureBackend
     {
         readonly ManualResetEvent stopped = new(false);
         SafeWaitHandle? timer; readonly nint[] waitHandles = new nint[2];
         readonly object shutdownGate = new(); bool disposed;
         long next, origin, frames, previous;
         readonly List<double> intervals = new();
+        byte[]? panPattern;
         public long Frames => Interlocked.Read(ref frames);
         public PixelLayout Layout => PixelLayout.Nv12;
         public int AudioRate => 0;
@@ -346,6 +433,13 @@ internal static class PresentationStressDiagnostics
             timer = CreateWaitableTimerEx(0, null, 2, 0x100002);
             if (timer.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
             waitHandles[0] = stopped.SafeWaitHandle.DangerousGetHandle(); waitHandles[1] = timer.DangerousGetHandle();
+            if (pan)
+            {
+                panPattern = new byte[width * height];
+                for (int y = 0; y < height; y++)
+                    for (int x = 0; x < width; x++)
+                        panPattern[y * width + x] = (byte)(16 + (17 * ((x / 13 + y / 9) % 13) + 5 * (x / 47 ^ y / 29)) % 220);
+            }
             origin = next = Clock.Now;
         }
         public Packet? Read()
@@ -366,7 +460,18 @@ internal static class PresentationStressDiagnostics
             if (previous != 0) intervals.Add((now - previous) / 10000.0); previous = now;
             long index = Interlocked.Increment(ref frames);
             var frame = new Packet(width * height * 3 / 2, false, width, height, PixelLayout.Nv12) { Time = arrivalJitter == 0 ? now : timestamp, Duration = 166667 };
-            Array.Fill(frame.Bytes, (byte)(index % 100 + 60), 0, width * height); Array.Fill(frame.Bytes, (byte)128, width * height, width * height / 2);
+            if (panPattern is { } pattern)
+            {
+                int shift = (int)(index * 19 % width);
+                for (int y = 0; y < height; y++)
+                {
+                    int row = y * width;
+                    pattern.AsSpan(row + shift, width - shift).CopyTo(frame.Bytes.AsSpan(row));
+                    pattern.AsSpan(row, shift).CopyTo(frame.Bytes.AsSpan(row + width - shift));
+                }
+            }
+            else Array.Fill(frame.Bytes, (byte)(index % 100 + 60), 0, width * height);
+            Array.Fill(frame.Bytes, (byte)128, width * height, width * height / 2);
             return frame;
         }
         internal Dictionary<string, object> CadenceStats()

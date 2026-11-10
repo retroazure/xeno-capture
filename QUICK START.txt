@@ -51,9 +51,10 @@ First use initializes the model. Higher quality/resolution costs GPU work.
 
 With frame generation off, the preview uses the next available display
 slot and selects the latest capture, including after a fullscreen resize.
-Smooth source pacing is on by default. On displays with at least twice
-the capture rate, it can hold an early frame for up to 2 ms. Turn it off
-under Output for immediate presentation.
+Sync preview to display is on by default under Output. On displays
+with at least twice the capture rate, it can hold an early frame for
+up to 2 ms. Fullscreen can hold for up to one refresh interval (6 ms
+maximum) to align frames when DXGI timing is available.
 Choose Frame generation > Gap recovery to fill isolated late-frame gaps
 with one predicted image. It needs display refresh of at least twice the
 capture rate and supports up to 1080p input.

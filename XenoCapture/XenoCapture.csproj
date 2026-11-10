@@ -15,7 +15,7 @@
     <PlatformTarget>x64</PlatformTarget>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Version>0.10.13</Version>
-    <MinimumRuntimePatch>10.0.14</MinimumRuntimePatch>
+    <MinimumRuntimePatch>10.0.15</MinimumRuntimePatch>
     <Description>Native capture-card preview, upscaling and recording.</Description>
   </PropertyGroup>
   <ItemGroup Condition="'$(SelfContained)' != 'true' and '$(RuntimeFrameworkVersion)' == ''">

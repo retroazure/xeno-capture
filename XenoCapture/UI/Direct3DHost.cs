@@ -73,6 +73,7 @@ internal sealed class Direct3DHost : HwndHost
     internal long SkippedAfterWait => Interlocked.Read(ref skippedAfterWait);
     internal Action? DiagnosticBeforeFrameLatch { get; set; }
     internal Action? DiagnosticAfterSourceDraw { get; set; }
+    internal event Action<uint, uint>? DiagnosticDisplayFrame;
     internal long EmptyWakeups => Interlocked.Read(ref emptyWakeups);
     internal long FrameWaitTimeouts => Interlocked.Read(ref frameWaitTimeouts);
     internal void DiagnosticWake() { lock (gate) { if (!stopping) signal.Set(); } }
@@ -228,17 +229,38 @@ internal sealed class Direct3DHost : HwndHost
                     var packet = latest;consumedArrival=latestArrival; latest = null; return packet;
                 }
             }
+            long? LastSourceDisplayTime() => sourcePacing.PresentCount is uint previous
+                && gpu.TryGetDisplayFrame(out var timing) && timing.PresentCount == previous
+                ? timing.DisplayedAt(refreshHz) : null;
+            long SourcePacingDeadline(Packet frame, long arrival, long? displayedAt, bool prepareAhead = false)
+            {
+                long? displayDue = displayedAt is long at
+                    ? sourcePacing.DisplayDeadline(frame.Time, frame.Duration, arrival, refreshHz, at, drawAhead: prepareAhead) : null;
+                if (!prepareAhead && displayDue is long due) return due;
+
+                // AI work starts at capture arrival, so cancel early arrival jitter within the
+                // existing display hold even when DXGI's estimated phase would release it first.
+                long captureDue = sourcePacing.Deadline(frame.Time, frame.Duration, arrival, refreshHz,
+                    useDisplayBudget: displayDue.HasValue);
+                return Math.Max(captureDue, displayDue.GetValueOrDefault());
+            }
             bool WaitForSourcePacing()
             {
                 if (entryAnimating || sourcePacingTimerUnavailable) return false;
+                long? displayedAt = LastSourceDisplayTime();
                 long due;
                 lock (gate)
                 {
                     if (stopping || !active || !smoothSourcePacing || latest is not { } frame) return false;
-                    due = sourcePacing.Deadline(frame.Time, frame.Duration, latestArrival, refreshHz);
+                    due = SourcePacingDeadline(frame, latestArrival, displayedAt);
                     if (due <= Clock.Now) return false;
                     waitingForSourcePacing = true;
                 }
+                try { return WaitForSourceDeadline(due); }
+                finally { lock (gate) waitingForSourcePacing = false; }
+            }
+            bool WaitForSourceDeadline(long due)
+            {
                 try
                 {
                     deadline ??= new FrameDeadlineWaiter(signal);
@@ -247,7 +269,6 @@ internal sealed class Direct3DHost : HwndHost
                     return true;
                 }
                 catch (System.ComponentModel.Win32Exception) { sourcePacingTimerUnavailable = true; return false; }
-                finally { lock (gate) waitingForSourcePacing = false; }
             }
             Packet? RefreshAfterAiStartup(long previousCreations, long duration)
             {
@@ -275,7 +296,8 @@ internal sealed class Direct3DHost : HwndHost
             }
             bool Publish(PresentedFrame frame, bool restoreSource = false)
             {
-                bool accepted = gpu.Present(allowBlocking: frame.Kind == PresentationKind.Source || restoreSource);
+                bool accepted = gpu.Present(allowBlocking: frame.Kind == PresentationKind.Source || restoreSource,
+                    syncToDisplay: SmoothSourcePacing);
                 LastSubmissionMs = gpu.LastUploadDrawMs;
                 Volatile.Write(ref enhancedUpscalingActive, gpu.UsedEnhancedUpscaling); Volatile.Write(ref rtxVideoRequested,gpu.RtxVideoRequested); Volatile.Write(ref upscalingFallbackReason, gpu.UpscalingFallbackReason);
                 PublishAiStatus();
@@ -294,6 +316,9 @@ internal sealed class Direct3DHost : HwndHost
                     Interlocked.Increment(ref generatedPresentations);
                 if (frame.Kind == PresentationKind.Repeated) Interlocked.Increment(ref repeatedPresentations);
                 FramePresented?.Invoke(frame);
+                var displayObserver = DiagnosticDisplayFrame;
+                if (displayObserver != null && gpu.TryGetDisplayFrame(out var timing))
+                    displayObserver(timing.PresentCount, timing.PresentRefreshCount);
                 return true;
             }
             void PublishAiStatus()
@@ -494,7 +519,12 @@ internal sealed class Direct3DHost : HwndHost
                 if ((multiplier > 1 || predictionRequested || paceSource) && (pending || gpu.HasInterpolationFrame))
                 {
                     if (Clock.Now - refreshChecked > 10_000_000 || refreshChecked == 0)
-                    { refreshHz = DiagnosticRefreshRate > 0 ? DiagnosticRefreshRate : DisplayTiming.RefreshRate(window); refreshChecked = Clock.Now; }
+                    {
+                        double currentRefresh = DiagnosticRefreshRate > 0 ? DiagnosticRefreshRate : DisplayTiming.RefreshRate(window);
+                        if (refreshHz != currentRefresh) sourcePacing = default;
+                        refreshHz = currentRefresh;
+                        refreshChecked = Clock.Now;
+                    }
                 }
                 if (multiplier > 1 && (pending || gpu.HasInterpolationFrame))
                 {
@@ -596,10 +626,14 @@ internal sealed class Direct3DHost : HwndHost
                     if (!Slot() || !Alive() || FrameGeneration != requested || Capped30Game != content30) continue;
                     // ResizeBuffers can stall. Keep the capture slot replaceable until it completes.
                     PrepareDraw();
-                    if (paceSource && WaitForSourcePacing()) continue;
+                    bool prepareAhead = isFullscreen && paceSource && gpu.AiVideo.Enabled
+                        && !entryAnimating && !sourcePacingTimerUnavailable;
+                    if (paceSource && !prepareAhead && WaitForSourcePacing()) continue;
                     DiagnosticBeforeFrameLatch?.Invoke();
                     using var frame = TakeLatest();
                     if (frame == null) { Interlocked.Increment(ref skippedAfterWait); continue; }
+                    long sourceDue = prepareAhead
+                        ? SourcePacingDeadline(frame, consumedArrival, LastSourceDisplayTime(), prepareAhead: true) : 0;
                     long featureCreations = gpu.VsrFeatureCreations;
                     bool DrawLiveSource(Packet source, bool allowRepeatSkip)
                     {
@@ -627,11 +661,24 @@ internal sealed class Direct3DHost : HwndHost
                     using var fresh = RefreshAfterAiStartup(featureCreations, frame.Duration)
                         ?? (Clock.Now - consumedArrival >= Math.Max(50_000, frame.Duration) ? TakeLatest() : null);
                     if (fresh != null) DrawLiveSource(fresh, allowRepeatSkip: false);
+                    else if (sourceDue > Clock.Now && SmoothSourcePacing && FrameGeneration == requested && Alive())
+                    {
+                        // Give the AI draw the pacing window as GPU time, then present on the usual refresh.
+                        gpu.SubmitPendingDraw();
+                        while (sourceDue > Clock.Now && SmoothSourcePacing && FrameGeneration == requested && Alive())
+                        {
+                            if (!WaitForSourceDeadline(sourceDue)) break;
+                        }
+                    }
                     if (!Alive()) continue;
                     var shown = fresh ?? frame;
                     bool accepted = Publish(new PresentedFrame(shown.Time, shown.Duration));
                     if (accepted && (requested == FrameGenerationMode.Off || recoveringGaps))
-                        sourcePacing = new(shown.Time, shown.Duration, consumedArrival);
+                    {
+                        uint? presentCount = isFullscreen && paceSource && !entryAnimating
+                            && SourceFramePacing.HasRefreshHeadroom(refreshHz, shown.Duration) ? gpu.LastPresentCount() : null;
+                        sourcePacing = new(shown.Time, shown.Duration, consumedArrival, presentCount);
+                    }
                     if (predicting)
                     {
                         bool hasPair = accepted && gpu.HasInterpolationPair;

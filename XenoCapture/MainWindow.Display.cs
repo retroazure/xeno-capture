@@ -15,7 +15,10 @@ namespace XenoCapture;
 
 public partial class MainWindow
 {
-    sealed record DisplayChoice(string? Device, string Label);
+    sealed record DisplayChoice(string? Device, string Label)
+    {
+        public override string ToString() => Label;
+    }
     string? fullscreenDisplayDevice;
     bool refreshingFullscreenDisplays;
 
@@ -34,7 +37,6 @@ public partial class MainWindow
         refreshingFullscreenDisplays = true;
         try
         {
-            FullscreenDisplay.DisplayMemberPath = nameof(DisplayChoice.Label);
             FullscreenDisplay.ItemsSource = choices;
             FullscreenDisplay.SelectedItem = choices.Find(choice => choice.Device == fullscreenDisplayDevice);
         }

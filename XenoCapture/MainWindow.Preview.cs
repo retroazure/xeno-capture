@@ -141,7 +141,7 @@ public partial class MainWindow
     void UpdateUpscalingStatus()
     {
         if (FrameGenerationHint != null) FrameGenerationHint.Text = SelectedFrameGeneration == FrameGenerationMode.Off
-            ? (SelectedSourcePacing ? "Off · smooth source pacing enabled" : "Off · lowest preview delay")
+            ? (SelectedSourcePacing ? "Off · display sync enabled" : "Off · lowest preview delay")
             : activePreview?.FrameGenerationStatus ?? FrameGenerationPolicy.WaitingStatus(SelectedFrameGeneration);
         bool aiEnabled=SelectedAiVideo.Enabled;
         if(AiVideoHint!=null)AiVideoHint.Text=aiEnabled ? !Connected?"Waiting for video · AI preview only":activePreview?.AiVideoStatus??"Waiting for video · AI preview only":"Off · uses the selected preview filter";

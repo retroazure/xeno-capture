@@ -32,7 +32,7 @@ Loaded AI features are reused when target dimensions change. Byte-identical reta
 
 ## Experimental frame generation
 
-**Output → Smooth source pacing** is on by default and applies with frame generation off or set to Gap recovery. When the display refresh is at least twice the capture rate, the preview can hold an early frame for up to 2 ms to make motion spacing more even. Late frames and irregular bursts proceed immediately. Turn the option off for immediate presentation at the next available slot.
+**Output → Sync preview to display** is on by default. The preview synchronizes presentation to the monitor's vertical refresh with a one-frame DXGI queue. With frame generation off or set to Gap recovery, the preview can also hold an early frame for up to 2 ms when the display refresh is at least twice the capture rate. Fullscreen can hold an early frame for up to one refresh interval, capped at 6 ms, to align it to the display when DXGI timing is available and the refresh rate closely matches a whole multiple of the capture rate. Late frames and irregular bursts skip the hold. Turn display sync off to prioritize the newest frame at the next available slot.
 
 Choose **Frame generation → Gap recovery · Late frames only** to fill isolated capture gaps. When a frame arrives late, the preview can use one predicted image from the last two real frames. A fresh capture takes priority. This mode supports up to 1080p input and needs display refresh of at least twice the capture rate. It skips prediction when motion is uncertain or a presentation slot is unavailable.
 
@@ -73,7 +73,7 @@ Audio starts off each session. **Phone output** is available on Android 11 or ne
 
 Phone preview defaults to **Responsive**, which caps the long edge at 1280 pixels, the frame rate at 30 FPS, and requests a 4 Mbps video bitrate. **Smooth** raises the cap to 60 FPS at 1280 pixels. **High detail** allows up to 1920 pixels at 60 FPS. Pick the profile before starting the USB session. Each phone connection starts with **Standard · Fast scaling** and AI upscaling off. [scrcpy video settings](https://github.com/Genymobile/scrcpy/blob/v5.0.1/doc/video.md#size)
 
-The Android helper uses zero added video buffering. With frame generation and Smooth source pacing off, both views display the latest available phone frame as soon as the presentation slot is ready. [scrcpy video buffering](https://github.com/Genymobile/scrcpy/blob/v5.0.1/doc/video.md#buffering)
+The Android helper uses zero added video buffering. With frame generation and display sync off, both views display the latest available phone frame as soon as the presentation slot is ready. [scrcpy video buffering](https://github.com/Genymobile/scrcpy/blob/v5.0.1/doc/video.md#buffering)
 
 ## Included features
 
@@ -98,20 +98,21 @@ Video is SDR and 8-bit, with one video input and one mono or stereo audio input.
 
 ## Build and diagnostics
 
-Install .NET SDK 10.0.403 or later and use `./build.ps1 -Standalone`; the framework-dependent option is `./build.ps1` and requires .NET Desktop Runtime 10.0.14 or later. Copy the executable together with its gpu folder. The .NET SDK may download official Windows SDK and .NET runtime packs.
+Install .NET SDK 10.0.404 or later and use `./build.ps1 -Standalone`. The framework-dependent option is `./build.ps1` and requires .NET Desktop Runtime 10.0.15 or later. Copy the executable together with its gpu folder. The .NET SDK may download official Windows SDK and .NET runtime packs.
 
 For a source build, use MSVC and the Windows SDK versions configured in `tools/Build-GpuBridge.ps1` and obtain the official [NVIDIA RTX Video SDK v1.1.0](https://developer.nvidia.com/rtx-video-sdk). Before running `build.ps1`, prepare the native files expected by the project:
 
 1. Run `./tools/Build-GpuBridge.ps1 -SdkRoot <sdk-directory> -OutputDirectory ./XenoCapture/Native/bin` from the project root to build the bridge. The bridge links the SDK's NGX library and uses NVIDIA's MIT-licensed Optical Flow headers. The NVIDIA driver supplies `nvofapi64.dll`.
 2. Place the SDK's `bin/Windows/x64/rel/nvngx_vsr.dll` and `NVIDIA_RTX_Video_SDK_License.pdf` from the SDK root in `XenoCapture/ThirdParty/RTXVideo`.
 
-For Android USB support, download the [official scrcpy 5.0.1 Windows x64 ZIP](https://github.com/Genymobile/scrcpy/releases/tag/v5.0.1) and pass its path to `./build.ps1 -Standalone -AndroidUsbArchive <zip-path>`. The script verifies the ZIP before staging the `android` folder. Keep that folder next to the executable. Xeno Capture checks its files before launching the helper.
+For Android USB support, download the [official scrcpy 5.0.1 Windows x64 ZIP](https://github.com/Genymobile/scrcpy/releases/tag/v5.0.1) and pass its path to `./build.ps1 -Standalone -AndroidUsbArchive <zip-path>`. The script verifies the ZIP before staging the `android` folder. Keep that folder next to the executable. Xeno Capture verifies the helper files before launch and denies writes to them while a phone session is open.
 
 Use `tools/Build-FrameShaders.ps1` to rebuild preview and compute bytecode after shader edits.
 
 Synthetic diagnostics do not open a camera/capture card or record a microphone:
 
 - `XenoCapture.exe --ai-video-tests <folder>`: explicit output sizes, quality, exact-frame cache, native/range/fallback, recording independence and six AI fullscreen round trips.
+- `XenoCapture.exe --presentation-tests <folder>`: synthetic preview pacing, DXGI display refresh gaps when available, and fullscreen transitions.
 - `XenoCapture.exe --self-test <folder>`: complete encoding, audio, GPU, UI and lifecycle suite.
 - `XenoCapture.exe --window-capture-tests <folder>`: synthetic preview window, pixel checks, resizing, disconnect and source closure.
 - `XenoCapture.exe --framegen-tests <folder>`: pixel oracles, hardware/software paths, cadence and 2×/3×/4× UI checks.

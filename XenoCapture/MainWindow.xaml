@@ -174,26 +174,31 @@
                 <Border Style="{StaticResource SectionIndex}"><TextBlock Text="2" HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="SemiBold"/></Border>
                 <TextBlock Text="Output" Style="{StaticResource SectionHeading}"/>
               </StackPanel>
-              <TextBlock Text="Frame generation" Style="{StaticResource Label}"/>
-              <ComboBox x:Name="PreviewFrameGeneration" SelectedIndex="0" SelectionChanged="FrameGenerationChanged"
-                        AutomationProperties.Name="Frame generation"
-                        ToolTip="Adaptive modes buffer one content frame for interpolation. Experimental Predictive modes estimate motion between captures with no frame buffering. Preview only.">
-                <ComboBoxItem Content="Off · Lowest delay"/>
-                <ComboBoxItem Content="Adaptive 2× · Motion checked"/>
-                <ComboBoxItem Content="Adaptive 3× · Motion checked"/>
-                <ComboBoxItem Content="Adaptive 4× · Motion checked"/>
-                <ComboBoxItem Content="Predictive 60 FPS · Experimental"/>
-                <ComboBoxItem Content="Predictive 120 FPS · Experimental"/>
-                <ComboBoxItem Content="Predictive 180 FPS · Experimental"/>
-                <ComboBoxItem Content="Gap recovery · Late frames only"/>
-              </ComboBox>
-              <CheckBox x:Name="Capped30GameToggle" Content="Force 30 FPS game cadence" Checked="Capped30GameChanged" Unchecked="Capped30GameChanged"
-                        Margin="0,9,0,0" ToolTip="Use when automatic 30 FPS detection is unreliable. Applies to Adaptive and Predictive modes."/>
-              <TextBlock x:Name="FrameGenerationHint" Text="Off · lowest preview delay" Foreground="{DynamicResource Muted}"
-                         FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
-              <CheckBox x:Name="SourcePacingToggle" Content="Smooth source pacing" IsChecked="True" Margin="0,9,0,0"
-                        Checked="SourcePacingChanged" Unchecked="SourcePacingChanged"
-                        ToolTip="With frame generation off or set to Gap recovery, hold early frames for up to 2 ms when the display is at least twice as fast as the source."/>
+              <Border Background="{DynamicResource InsetBrush}" BorderBrush="{DynamicResource LineBrush}"
+                      BorderThickness="1" CornerRadius="12" Padding="10">
+                <StackPanel>
+                  <TextBlock Text="Frame generation" Style="{StaticResource Label}"/>
+                  <ComboBox x:Name="PreviewFrameGeneration" SelectedIndex="0" SelectionChanged="FrameGenerationChanged"
+                            AutomationProperties.Name="Frame generation"
+                            ToolTip="Adaptive modes buffer one content frame for interpolation. Experimental Predictive modes estimate motion between captures with no frame buffering. Preview only.">
+                    <ComboBoxItem Content="Off · Lowest delay"/>
+                    <ComboBoxItem Content="Adaptive 2× · Motion checked"/>
+                    <ComboBoxItem Content="Adaptive 3× · Motion checked"/>
+                    <ComboBoxItem Content="Adaptive 4× · Motion checked"/>
+                    <ComboBoxItem Content="Predictive 60 FPS · Experimental"/>
+                    <ComboBoxItem Content="Predictive 120 FPS · Experimental"/>
+                    <ComboBoxItem Content="Predictive 180 FPS · Experimental"/>
+                    <ComboBoxItem Content="Gap recovery · Late frames only"/>
+                  </ComboBox>
+                  <TextBlock x:Name="FrameGenerationHint" Text="Off · lowest preview delay" Foreground="{DynamicResource Muted}"
+                             FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                  <CheckBox x:Name="Capped30GameToggle" Content="Force 30 FPS game cadence" Checked="Capped30GameChanged" Unchecked="Capped30GameChanged"
+                            Margin="0,9,0,0" ToolTip="Use when automatic 30 FPS detection is unreliable. Applies to Adaptive and Predictive modes."/>
+                  <CheckBox x:Name="SourcePacingToggle" Content="Sync preview to display" IsChecked="True" Margin="0,9,0,0"
+                            Checked="SourcePacingChanged" Unchecked="SourcePacingChanged"
+                            ToolTip="Synchronize preview presentation to the display refresh. With frame generation off or set to Gap recovery, early frames may wait briefly to even out their spacing."/>
+                </StackPanel>
+              </Border>
               <TextBlock Text="Fullscreen display" Style="{StaticResource Label}" Margin="0,13,0,6"/>
               <ComboBox x:Name="FullscreenDisplay" DropDownOpened="FullscreenDisplayOpened" SelectionChanged="FullscreenDisplayChanged"
                         AutomationProperties.Name="Fullscreen display"/>

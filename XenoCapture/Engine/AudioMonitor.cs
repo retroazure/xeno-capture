@@ -92,7 +92,8 @@ internal sealed class AudioMonitor : IDisposable
                 uint padding; Native.Hr(((delegate* unmanaged[Stdcall]<nint, uint*, int>)client.Slot(6))(cp, &padding));
                 uint available = frames - Math.Min(frames, padding); if (available == 0) continue;
                 nint data; Native.Hr(((delegate* unmanaged[Stdcall]<nint, uint, nint*, int>)renderer.Slot(3))(rp, available, &data));
-                var target = new Span<byte>((void*)data, checked((int)available * format.Align)); target.Clear(); int written = 0;
+                var target = new Span<byte>((void*)data, checked((int)available * format.Align));
+                int written = 0;
                 try
                 {
                     while (written < target.Length)
@@ -107,7 +108,14 @@ internal sealed class AudioMonitor : IDisposable
                         if (offset >= current.Length) { current.Dispose(); current = null; }
                     }
                 }
-                finally { Native.Hr(((delegate* unmanaged[Stdcall]<nint, uint, uint, int>)renderer.Slot(4))(rp, available, written == 0 ? 2u : 0u)); Interlocked.Add(ref framesWritten, written / format.Align); }
+                finally
+                {
+                    const uint silent = 2;
+                    if (written > 0) target[written..].Clear();
+                    Native.Hr(((delegate* unmanaged[Stdcall]<nint, uint, uint, int>)renderer.Slot(4))
+                        (rp, available, written == 0 ? silent : 0));
+                    Interlocked.Add(ref framesWritten, written / format.Align);
+                }
             }
         }
         finally { current?.Dispose(); client.Call(11); client.Call(12); }

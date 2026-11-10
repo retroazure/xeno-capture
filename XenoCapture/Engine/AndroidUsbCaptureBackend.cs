@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
@@ -39,6 +40,7 @@ internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playA
 
     CancellationToken cancellation;
     AndroidProcessJob? job;
+    VerifiedPackage? package;
     Process? adb, scrcpy;
     readonly object playbackGate = new();
     bool playbackClosing;
@@ -60,7 +62,7 @@ internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playA
     {
         cancellation = token;
         folder = Path.Combine(AppContext.BaseDirectory, HelperFolder);
-        VerifyPackage(folder, token);
+        package = new VerifiedPackage(folder, token);
         job = new AndroidProcessJob();
         // An ephemeral port avoids taking over an existing adb server.
         adb = job.Start(HelperProcess("adb.exe", "-L", "tcp:0", "server", "nodaemon"));
@@ -176,7 +178,8 @@ internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playA
         foreach (string name in new[]
         {
             "ADB_SERVER_SOCKET", "ANDROID_ADB_SERVER_ADDRESS", "ANDROID_ADB_SERVER_PORT", "ADB_SERVER_PORT",
-            "ADB_VENDOR_KEYS", "ADB_TRACE", "ANDROID_SERIAL", "SCRCPY_SERVER_PATH", "SCRCPY_ICON_PATH"
+            "ADB_VENDOR_KEYS", "ADB_TRACE", "ANDROID_SERIAL", "SCRCPY_SERVER_PATH", "SCRCPY_ICON_PATH",
+            "SDL3_DYNAMIC_API", "SDL_OPENGL_LIBRARY", "SDL_EGL_LIBRARY", "SDL_VULKAN_LIBRARY"
         }) info.Environment.Remove(name);
 
         // Limit selection to cable-connected devices, even when wireless debugging exists on the PC.
@@ -190,23 +193,44 @@ internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playA
         return info;
     }
 
-    internal static void VerifyPackage(string path, CancellationToken token)
+    sealed class VerifiedPackage : IDisposable
     {
-        if (!Directory.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
-            throw new InvalidOperationException("Install the verified Android USB helper beside XenoCapture.exe.");
-        var entries = Directory.EnumerateFileSystemEntries(path).ToArray();
-        if (entries.Length != HelperFiles.Length)
-            throw new InvalidOperationException("The Android USB helper folder does not match the verified package.");
+        // Deny writes and replacement while the helper may still load a file.
+        readonly List<FileStream> files = new(HelperFiles.Length);
 
-        foreach (var (name, hash) in HelperFiles)
+        internal VerifiedPackage(string path, CancellationToken token)
         {
-            token.ThrowIfCancellationRequested();
-            string file = Path.Combine(path, name);
-            if (!File.Exists(file) || (File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0)
-                throw new InvalidOperationException("The Android USB helper folder is incomplete.");
-            using var data = File.OpenRead(file);
-            if (Convert.ToHexString(SHA256.HashData(data)) != hash)
-                throw new InvalidOperationException("An Android USB helper file failed verification.");
+            if (!Directory.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidOperationException("Install the verified Android USB helper beside XenoCapture.exe.");
+            if (Directory.EnumerateFileSystemEntries(path).Take(HelperFiles.Length + 1).Count() != HelperFiles.Length)
+                throw new InvalidOperationException("The Android USB helper folder does not match the verified package.");
+
+            try
+            {
+                foreach (var (name, hash) in HelperFiles)
+                {
+                    token.ThrowIfCancellationRequested();
+                    string file = Path.Combine(path, name);
+                    if (!File.Exists(file) || (File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0)
+                        throw new InvalidOperationException("The Android USB helper folder is incomplete.");
+
+                    var data = File.OpenRead(file);
+                    files.Add(data);
+                    if (data.Length is < 1 or > 16 * 1024 * 1024 || Convert.ToHexString(SHA256.HashData(data)) != hash)
+                        throw new InvalidOperationException("An Android USB helper file failed verification.");
+                }
+            }
+            catch
+            {
+                Dispose();
+                throw;
+            }
+        }
+
+        public void Dispose()
+        {
+            foreach (var file in files) file.Dispose();
+            files.Clear();
         }
     }
 
@@ -234,9 +258,9 @@ internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playA
             }
             finally
             {
-                job?.Dispose();
                 try
                 {
+                    job?.Dispose();
                     if (adb?.WaitForExit(900) == false)
                         throw new InvalidOperationException("The Android USB service did not exit.");
                 }
@@ -244,6 +268,7 @@ internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playA
                 {
                     scrcpy?.Dispose();
                     adb?.Dispose();
+                    package?.Dispose();
                 }
             }
         }

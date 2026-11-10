@@ -8,13 +8,13 @@ internal enum FrameGenerationMode { Off, Adaptive2x, Adaptive3x, Adaptive4x, Pre
 internal enum PresentationKind { Source, Interpolated, Repeated, Predicted }
 internal enum FrameSlotWait { Ready, Interrupted, TimedOut }
 internal readonly record struct PresentedFrame(long Time, long Duration, PresentationKind Kind = PresentationKind.Source);
-internal readonly record struct SourceFramePacing(long Time, long Duration, long Arrival)
+internal readonly record struct SourceFramePacing(long Time, long Duration, long Arrival, uint? PresentCount = null)
 {
     internal static bool HasRefreshHeadroom(double refreshHz, long period) =>
         period is >= 80_000 and <= 500_000
         && refreshHz + Math.Max(1.1, refreshHz * .01) >= 20_000_000.0 / period;
 
-    internal long Deadline(long time, long duration, long arrival, double refreshHz)
+    internal long Deadline(long time, long duration, long arrival, double refreshHz, bool useDisplayBudget = false)
     {
         if (Arrival == 0 || time <= Time || !HasRefreshHeadroom(refreshHz, duration)
             || Duration < duration - duration / 16 || Duration > duration + duration / 16)
@@ -27,9 +27,35 @@ internal readonly record struct SourceFramePacing(long Time, long Duration, long
             || arrivalGap < sourceGap * 3 / 4 || arrivalGap > sourceGap - 7_500)
             return arrival;
 
-        long maximumHold = Math.Min(20_000, Math.Min(duration / 8, (long)(5_000_000 / refreshHz)));
+        long maximumHold = useDisplayBudget ? MaximumDisplayHold(duration, 10_000_000 / refreshHz)
+            : Math.Min(20_000, Math.Min(duration / 8, (long)(5_000_000 / refreshHz)));
         return arrival + Math.Min(sourceGap - arrivalGap, maximumHold);
     }
+
+    internal long? DisplayDeadline(long time, long duration, long arrival, double refreshHz, long displayedAt,
+        bool drawAhead = false)
+    {
+        long sourceGap = time - Time, arrivalGap = arrival - Arrival;
+        if (!HasRefreshHeadroom(refreshHz, duration) || Math.Abs(Duration - duration) > duration / 16
+            || sourceGap < duration - duration / 12 || sourceGap > duration + duration / 12
+            || arrivalGap < sourceGap * 3 / 4)
+            return null;
+
+        double refreshPeriod = 10_000_000 / refreshHz;
+        double slots = duration / refreshPeriod, wholeSlots = Math.Round(slots);
+        if (wholeSlots < 2 || Math.Abs(slots - wholeSlots) > .08
+            || displayedAt < Arrival || displayedAt - Arrival > 2 * refreshPeriod || displayedAt > arrival)
+            return null;
+
+        // Submit inside the intended refresh window. An already prepared image
+        // can use a larger guard against uncertainty in DXGI's vblank timestamp.
+        long guard = drawAhead ? (long)Math.Round(refreshPeriod / 4) : 3_500;
+        long start = displayedAt + (long)Math.Round((wholeSlots - 1) * refreshPeriod) + guard;
+        return start > arrival && start - arrival <= MaximumDisplayHold(duration, refreshPeriod) ? start : arrival;
+    }
+
+    static long MaximumDisplayHold(long duration, double refreshPeriod) =>
+        Math.Min(60_000, Math.Min(duration / 3, (long)refreshPeriod));
 }
 
 internal static class FrameGenerationPolicy

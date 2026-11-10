@@ -1,5 +1,5 @@
 using System;
-using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -14,7 +14,7 @@ internal sealed record RecordingOptions(string Path, int SourceWidth, int Source
 internal sealed class Recorder
 {
     readonly RecordingOptions options;
-    readonly ConcurrentQueue<Packet> video = new(), audio = new();
+    readonly Queue<Packet> video = new(), audio = new();
     readonly AutoResetEvent signal = new(false);
     readonly object queueLock = new();
     readonly long origin;
@@ -89,14 +89,16 @@ internal sealed class Recorder
             long lastVideo = -1, lastAudio = -1;
             while (true)
             {
-                Packet? packet = null;
-                // Merge by capture time rather than draining one stream ahead of the other.
-                bool hasVideo = video.TryPeek(out var nextVideo);
-                bool hasAudio = audio.TryPeek(out var nextAudio);
-                if (hasAudio && (!hasVideo || nextAudio!.Time <= nextVideo!.Time))
-                    audio.TryDequeue(out packet);
-                else if (hasVideo)
-                    video.TryDequeue(out packet);
+                Packet? packet;
+                lock (queueLock)
+                {
+                    // Merge by capture time while the queue heads are stable.
+                    if (audio.TryPeek(out var nextAudio)
+                        && (!video.TryPeek(out var nextVideo) || nextAudio.Time <= nextVideo.Time))
+                        packet = audio.Dequeue();
+                    else if (!video.TryDequeue(out packet) && stopping)
+                        break;
+                }
                 if (packet != null)
                 {
                     using (packet)
@@ -123,8 +125,7 @@ internal sealed class Recorder
                     }
                     continue;
                 }
-                lock (queueLock) { if (stopping && video.IsEmpty && audio.IsEmpty) break; }
-                signal.WaitOne(15);
+                signal.WaitOne();
             }
             Native.Hr(writer.Call(11));
         }
@@ -136,8 +137,13 @@ internal sealed class Recorder
         }
         finally
         {
-            lock (queueLock) { stopping = true; signal.Dispose(); }
-            while (video.TryDequeue(out var v)) v.Dispose(); while (audio.TryDequeue(out var a)) a.Dispose();
+            lock (queueLock)
+            {
+                stopping = true;
+                while (video.TryDequeue(out var frame)) frame.Dispose();
+                while (audio.TryDequeue(out var sample)) sample.Dispose();
+                signal.Dispose();
+            }
         }
     }
     Com VideoType(Guid subtype, int width, int height)
@@ -158,10 +164,12 @@ internal sealed class Recorder
         Task running;
         lock (queueLock)
         {
-            stopping = true; ready.TrySetCanceled();
+            bool wakeWorker = !stopping;
+            stopping = true;
+            ready.TrySetCanceled();
             running = worker ?? Task.CompletedTask;
             if (worker == null) signal.Dispose();
-            else if (!worker.IsCompleted) { try { signal.Set(); } catch (ObjectDisposedException) { } }
+            else if (wakeWorker) signal.Set();
         }
         try { await running.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false); }
         catch (TimeoutException)
@@ -176,12 +184,14 @@ internal sealed class VideoScaler : IDisposable
 {
     readonly Bitmap output;
     readonly Graphics graphics;
+    readonly ImageAttributes attributes = new();
     readonly byte[] result;
     readonly RecordingOptions options;
     public VideoScaler(RecordingOptions options)
     {
         this.options = options; output = new(options.Width, options.Height, PixelFormat.Format32bppRgb); graphics = Graphics.FromImage(output);
         graphics.InterpolationMode = InterpolationMode.HighQualityBicubic; graphics.PixelOffsetMode = PixelOffsetMode.HighQuality; graphics.CompositingMode = CompositingMode.SourceCopy;
+        attributes.SetWrapMode(WrapMode.TileFlipXY);
         result = new byte[checked(options.Width * options.Height * 4)];
     }
     public unsafe ReadOnlySpan<byte> Resize(Packet packet)
@@ -193,15 +203,27 @@ internal sealed class VideoScaler : IDisposable
             graphics.Clear(Color.Black);
             double scale = Math.Min((double)options.Width / packet.Width, (double)options.Height / packet.Height);
             int w = (int)Math.Round(packet.Width * scale), h = (int)Math.Round(packet.Height * scale);
-            using var attributes = new ImageAttributes(); attributes.SetWrapMode(WrapMode.TileFlipXY);
             graphics.DrawImage(input, new Rectangle((options.Width - w) / 2, (options.Height - h) / 2, w, h), 0, 0, packet.Width, packet.Height, GraphicsUnit.Pixel, attributes);
         }
         var locked = output.LockBits(new Rectangle(0, 0, output.Width, output.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
-        try { for (int y = 0; y < output.Height; y++) Marshal.Copy(locked.Scan0 + y * locked.Stride, result, y * output.Width * 4, output.Width * 4); }
+        try
+        {
+            int rowBytes = output.Width * 4;
+            if (locked.Stride == rowBytes)
+                Marshal.Copy(locked.Scan0, result, 0, result.Length);
+            else
+                for (int y = 0; y < output.Height; y++)
+                    Marshal.Copy(locked.Scan0 + y * locked.Stride, result, y * rowBytes, rowBytes);
+        }
         finally { output.UnlockBits(locked); }
         return result;
     }
-    public void Dispose() { graphics.Dispose(); output.Dispose(); }
+    public void Dispose()
+    {
+        attributes.Dispose();
+        graphics.Dispose();
+        output.Dispose();
+    }
 }
 
 

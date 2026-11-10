@@ -52,7 +52,16 @@ public partial class MainWindow
         var timeout = System.Diagnostics.Stopwatch.StartNew();
         while (!DiagnosticHasFrame && DiagnosticConnected && timeout.ElapsedMilliseconds < 5000)
             await Task.Delay(10);
-        if (maximize && fastestMonitor)
+        if (maximize) await DiagnosticFullscreen(fastestMonitor);
+        else await ToggleFullscreen();
+        if (fullscreen == null) throw new InvalidOperationException("The diagnostic video could not enter fullscreen.");
+    }
+    internal Task DiagnosticDemo() => StartDemo();
+    internal long DiagnosticPresented => System.Threading.Interlocked.Read(ref presentedFrames);
+    internal XenoCapture.UI.Direct3DHost? DiagnosticPreview => activePreview;
+    internal async Task DiagnosticFullscreen(bool fastestMonitor = false)
+    {
+        if (fastestMonitor)
         {
             var screen = System.Windows.Forms.Screen.AllScreens
                 .OrderByDescending(s => DisplayTiming.RefreshRateForDevice(s.DeviceName)).First();
@@ -61,17 +70,8 @@ public partial class MainWindow
         else
         {
             await ToggleFullscreen();
-            if (maximize) DiagnosticMaximizeFullscreen();
+            DiagnosticMaximizeFullscreen();
         }
-        if (fullscreen == null) throw new InvalidOperationException("The diagnostic video could not enter fullscreen.");
-    }
-    internal Task DiagnosticDemo() => StartDemo();
-    internal long DiagnosticPresented => System.Threading.Interlocked.Read(ref presentedFrames);
-    internal XenoCapture.UI.Direct3DHost? DiagnosticPreview => activePreview;
-    internal async Task DiagnosticFullscreen()
-    {
-        await ToggleFullscreen();
-        if (fullscreen != null) fullscreen.WindowState = WindowState.Maximized;
     }
     internal void DiagnosticMaximizeFullscreen()
     {
