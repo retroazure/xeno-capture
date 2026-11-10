@@ -89,6 +89,7 @@ public partial class MainWindow
     internal int DiagnosticSession => sessions.Generation;
     internal bool DiagnosticActive => sessions.Active;
     internal bool DiagnosticConnected => Connected;
+    internal bool DiagnosticKeepsAwake => capturePower?.Active == true;
     internal bool DiagnosticBusy => busy;
     internal bool DiagnosticRecording => recorder != null || pendingRecorder != null;
     internal bool DiagnosticHasFrame { get { lock (frameGate) return latest != null; } }

@@ -164,6 +164,7 @@ public partial class MainWindow
                         else if (Status.Text == WaitingForHdmi) SetStatus("Input connected.");
                         AnimateFeedback(SignalDot);
                         PlayCue(InterfaceCue.Connected);
+                        KeepCaptureAwake();
                         SetControls();
                     }
                     return Task.CompletedTask;

@@ -6,7 +6,7 @@ Xeno Capture is an open-source Windows x64 app for viewing and recording HDMI vi
 
 ## Scope
 
-The HDMI workflow starts with an unprotected SDR signal and ends with local preview, audio monitoring, or files. Android phones can also be previewed over a USB data cable. A 1080p60 signal with stereo audio is a good starting point for console capture. Console rendering and controller input stay on the console. Game emulation, live streaming, HDR, VRR, and protected HDMI capture are outside the app's scope.
+The HDMI workflow starts with an unprotected SDR signal and ends with local preview, audio monitoring, or files. Android phones can also be previewed over a USB data cable. A 1080p60 signal with stereo audio is a good starting point for console capture. Active video playback requests that Windows keep the system and display awake until the capture session disconnects or the app closes. Console rendering and controller input stay on the console. Game emulation, live streaming, HDR, VRR, and protected HDMI capture are outside the app's scope.
 
 Xeno Capture sees the finished video frames from the capture card. The capture feed supplies no game-engine motion vectors, depth, or separate HUD layers. The optional filters estimate motion and detail from those finished frames, and the actual results depend on the source, GPU, capture card, and display.
 

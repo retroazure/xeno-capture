@@ -15,6 +15,7 @@ public partial class MainWindow
     readonly SessionLifetime sessions = new();
     readonly SharedOperation disconnect = new(true), recordingStop = new(true), connectionStart = new(true), monitorStop = new(true);
     Recorder? pendingRecorder;
+    CapturePowerRequest? capturePower;
     AudioMonitor? pendingMonitor;
     int monitorRequest;
     bool busy => operations.IsBusy || closing;
@@ -37,11 +38,22 @@ public partial class MainWindow
     }
     async Task StopOwned(CaptureStream? input)
     { if (input != null) { try { await input.Stop(); } catch (Exception ex) { if (!closing) SetStatus("Input cleanup: " + FriendlyError(ex), true); } } }
+    void KeepCaptureAwake()
+    {
+        if (capturePower != null) return;
+        try { capturePower = new CapturePowerRequest(); }
+        catch (Win32Exception error)
+        {
+            SetStatus("Video is active, but Windows could not keep the display awake. " + error.Message, true);
+        }
+    }
     Task Disconnect() => disconnect.Run(DisconnectCore);
     async Task DisconnectCore()
     {
         using var operation = BusyScope();
         sessions.End(); ++modeRequest;
+        using var power = capturePower;
+        capturePower = null;
         activePreview = null; embeddedPreview.Active = false;
         if (!closing) SetStatus("Disconnecting…");
         var errors = new List<Exception>();
@@ -140,6 +152,8 @@ public partial class MainWindow
         catch (Exception) { /* Close still releases the remaining managed UI resources below. */ }
         finally
         {
+            capturePower?.Dispose();
+            capturePower = null;
             metricsTimer.Stop(); activePreview = null;
             lock (frameGate) { latest?.Dispose(); latest = null; }
             try { await embeddedPreview.StopAsync(); embeddedPreview.Dispose(); } catch { }

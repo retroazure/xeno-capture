@@ -198,6 +198,7 @@ internal static class LifecycleDiagnostics
             await waiting.DiagnosticConnect().WaitAsync(TimeSpan.FromSeconds(4));
             Require(waiting.DiagnosticConnected && ReferenceEquals(waiting.DiagnosticPreview, waiting.DiagnosticEmbedded)
                 && waiting.DiagnosticStatus.StartsWith("Waiting for HDMI video"), "A missing HDMI signal opened fullscreen or disconnected.");
+            Require(!waiting.DiagnosticKeepsAwake, "A capture with no video signal prevented idle sleep.");
             await waiting.DiagnosticDisconnect().WaitAsync(TimeSpan.FromSeconds(2));
             Require(!waiting.DiagnosticConnected && noSignal.DisposeCount == 1, "No-signal input did not release.");
         }
@@ -260,14 +261,21 @@ internal static class LifecycleDiagnostics
         backends.Enqueue(firstBackend); backends.Enqueue(secondBackend);
         var reconnect = new MainWindow(false, false, (_, _) => new CaptureStream(() => backends.Dequeue(), TimeSpan.FromSeconds(1))) { ShowActivated = false };
         reconnect.Show(); reconnect.DiagnosticPrepareInput(); Mark("reconnectFirstConnect", "starting"); await reconnect.DiagnosticConnect().WaitAsync(TimeSpan.FromSeconds(3)); Mark("reconnectFirstRead", reconnect.DiagnosticStatus); await firstBackend.SecondRead.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await WaitFor(() => reconnect.DiagnosticKeepsAwake);
+        Mark("videoKeepsDisplayAndSystemAwake", "pass");
         int oldSession = reconnect.DiagnosticSession;
         Mark("reconnectFirstDisconnect", "starting"); await Task.WhenAll(reconnect.DiagnosticDisconnect(), reconnect.DiagnosticDisconnect()).WaitAsync(TimeSpan.FromSeconds(3)); Mark("reconnectFirstDisconnect", "complete");
-        Require(!reconnect.DiagnosticBusy && !reconnect.DiagnosticConnected, "Disconnect left controls busy or input attached.");
+        Require(!reconnect.DiagnosticBusy && !reconnect.DiagnosticConnected && !reconnect.DiagnosticKeepsAwake,
+            "Disconnect left controls busy, input attached, or a wake request active.");
+        Mark("disconnectReleasesPowerRequest", "pass");
         Mark("reconnectSecondConnect", "starting"); await reconnect.DiagnosticConnect().WaitAsync(TimeSpan.FromSeconds(3)); Mark("reconnectSecondRead", reconnect.DiagnosticStatus); await secondBackend.SecondRead.Task.WaitAsync(TimeSpan.FromSeconds(3)); long freshTime = reconnect.DiagnosticFrameTime;
+        await WaitFor(() => reconnect.DiagnosticKeepsAwake);
         using (var stale = new Packet(16, false, 2, 2) { Time = -12345 }) reconnect.DiagnosticStaleFrame(oldSession, stale);
         reconnect.DiagnosticStaleFailure(oldSession); await Task.Delay(50);
         Require(reconnect.DiagnosticActive && reconnect.DiagnosticConnected && reconnect.DiagnosticFrameTime == freshTime, "Old callbacks disrupted a reconnected input.");
         Mark("reconnectClose", "starting"); await reconnect.DiagnosticClose().WaitAsync(TimeSpan.FromSeconds(3)); Mark("reconnectRejectsStaleFrameAndFailure", "pass");
+        Require(!reconnect.DiagnosticKeepsAwake, "Closing retained the capture power request.");
+        Mark("closeAndReconnectPowerRequests", "pass");
         var recordingWindow = new MainWindow(false, false, null) { ShowActivated = false }; recordingWindow.Show(); await recordingWindow.DiagnosticDemo(); await WaitFor(() => recordingWindow.DiagnosticHasFrame);
         await recordingWindow.DiagnosticRecord(directory); await Task.Delay(200); string uiRecording = recordingWindow.DiagnosticRecordingPath ?? throw new InvalidOperationException("UI recording did not start.");
         await recordingWindow.DiagnosticClose().WaitAsync(TimeSpan.FromSeconds(5)); Require(!recordingWindow.DiagnosticRecording, "Closing left a recording active.");
@@ -286,6 +294,8 @@ internal static class LifecycleDiagnostics
         Require(staleEncoder.DiagnosticRecording, "A retired encoder callback stopped the new recording.");
         await staleEncoder.DiagnosticClose().WaitAsync(TimeSpan.FromSeconds(5)); Mark("staleEncoderFailureDoesNotStopNewRecording", "pass");
         await WaitFor(() => Packet.LiveBuffers == baseline && MediaFoundationUsage.ActiveWorkers == 0);
+        Require(CapturePowerRequest.ActiveRequests == 0, "Shutdown retained a Windows power request.");
+        Mark("powerRequestsAfterShutdown", CapturePowerRequest.ActiveRequests);
         Mark("pooledBuffersAfterShutdown", Packet.LiveBuffers - baseline); Mark("mediaFoundationWorkersAfterShutdown", MediaFoundationUsage.ActiveWorkers);
         Mark("physicalUnplugTest", "not exercised - removal simulated at capture backend");
         return checks;
