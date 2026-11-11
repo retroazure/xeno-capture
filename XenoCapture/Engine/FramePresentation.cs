@@ -61,6 +61,7 @@ internal readonly record struct SourceFramePacing(long Time, long Duration, long
 internal struct FullscreenSourceCadence
 {
     long previousTime, previousDuration, expectedArrival;
+    bool previousArrivalWasLate;
 
     internal static uint RefreshInterval(long duration, double refreshHz)
     {
@@ -70,7 +71,7 @@ internal struct FullscreenSourceCadence
         return whole is >= 2 and <= 4 && Math.Abs(refreshes - whole) <= .05 ? (uint)whole : 0;
     }
 
-    internal long Deadline(long time, long duration, long arrival, double refreshHz, out bool reanchored)
+    internal long Deadline(long time, long duration, long arrival, double refreshHz, out long steadySubmitBy)
     {
 
         long gap = time - previousTime;
@@ -79,18 +80,28 @@ internal struct FullscreenSourceCadence
         previousTime = time;
         previousDuration = duration;
         long error = arrival - (expectedArrival + duration);
-        reanchored = !continuous || error < -duration / 2 || error > duration / 2;
-        if (reanchored)
+        if (!continuous || error < -duration / 2 || error > duration / 2)
         {
-            expectedArrival = arrival;
+            // Show an isolated late frame immediately. Keep its original phase
+            // so the next on-time capture can resume steady presentation.
+            bool isolatedDelay = continuous && !previousArrivalWasLate
+                && error > duration / 2 && error <= duration;
+            expectedArrival = isolatedDelay ? expectedArrival + duration : arrival;
+            previousArrivalWasLate = isolatedDelay;
+            steadySubmitBy = arrival;
             return arrival;
         }
+        previousArrivalWasLate = false;
 
         // Follow slow drift between the capture and PC clocks. A short
         // reserve absorbs delivery jitter while retaining the newest-frame slot.
         expectedArrival += duration + error / 32;
-        long holdLimit = Math.Min(60_000, (long)(10_000_000 / refreshHz));
-        return Math.Clamp(expectedArrival + holdLimit * 2 / 3, arrival, arrival + holdLimit);
+        long refreshPeriod = (long)(10_000_000 / refreshHz);
+        long holdLimit = Math.Min(60_000, refreshPeriod);
+        long scheduled = Math.Min(expectedArrival + holdLimit * 2 / 3, arrival + holdLimit);
+        // A late arrival consumes the same refresh budget as a late draw.
+        steadySubmitBy = scheduled + refreshPeriod;
+        return Math.Max(scheduled, arrival);
     }
 }
 

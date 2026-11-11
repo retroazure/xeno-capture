@@ -682,12 +682,9 @@ internal sealed class Direct3DHost : HwndHost
                     if (frame == null) { Interlocked.Increment(ref skippedAfterWait); continue; }
                     uint sourceInterval = prepareAhead && clockInterval != 0
                         ? FullscreenSourceCadence.RefreshInterval(frame.Duration, refreshHz) : 0;
-                    long sourceDue = 0;
+                    long sourceDue = 0, steadySubmitBy = 0;
                     if (sourceInterval != 0)
-                    {
-                        sourceDue = steadyCadence.Deadline(frame.Time, frame.Duration, consumedArrival, refreshHz, out bool reanchored);
-                        if (reanchored) sourceInterval = 0;
-                    }
+                        sourceDue = steadyCadence.Deadline(frame.Time, frame.Duration, consumedArrival, refreshHz, out steadySubmitBy);
                     else if (prepareAhead)
                     {
                         sourceDue = SourcePacingDeadline(frame, consumedArrival, LastSourceDisplayTime(), prepareAhead: true);
@@ -733,7 +730,7 @@ internal sealed class Direct3DHost : HwndHost
                     var shown = fresh ?? frame;
                     // A missed deadline should let the next capture catch up at the next refresh.
                     uint refreshInterval = sourceInterval != 0 && fresh == null && SteadyFullscreenPacing
-                        && FrameGeneration == requested && Clock.Now - sourceDue < shown.Duration / sourceInterval
+                        && FrameGeneration == requested && Clock.Now < steadySubmitBy
                         ? sourceInterval : 1;
                     bool accepted = Publish(new PresentedFrame(shown.Time, shown.Duration), refreshInterval: refreshInterval);
                     if (accepted && (requested == FrameGenerationMode.Off || recoveringGaps))

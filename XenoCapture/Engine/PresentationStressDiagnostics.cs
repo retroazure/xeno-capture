@@ -317,8 +317,38 @@ internal static class PresentationStressDiagnostics
             if (maxDeviation > 8_000)
                 throw new InvalidOperationException("Steady pacing did not smooth alternating input jitter.");
             long missedFrame = baseTime + 241 * period;
-            if (cadence.Deadline(missedFrame, period, missedFrame + lag, hz, out bool reanchored) != missedFrame + lag || !reanchored)
+            if (cadence.Deadline(missedFrame, period, missedFrame + lag, hz, out long steadySubmitBy) != missedFrame + lag || steadySubmitBy > missedFrame + lag)
                 throw new InvalidOperationException("Steady pacing held a frame after a dropped input.");
+            const long delay = 120_000;
+            FullscreenSourceCadence lateDelivery = default;
+            lateDelivery.Deadline(baseTime, period, baseTime + lag, hz, out _);
+            long late = baseTime + period + lag + delay;
+            if (lateDelivery.Deadline(baseTime + period, period, late, hz, out steadySubmitBy) != late || steadySubmitBy > late)
+                throw new InvalidOperationException("A late source frame should be shown immediately.");
+            long resumed = baseTime + 2 * period + lag;
+            long resumedDue = lateDelivery.Deadline(baseTime + 2 * period, period, resumed, hz, out steadySubmitBy);
+            if (steadySubmitBy <= resumedDue || resumedDue <= resumed || resumedDue > resumed + holdLimit)
+                throw new InvalidOperationException("A single late frame disrupted the next on-time frame.");
+
+            // A permanent delivery shift must still establish a new clock.
+            lateDelivery = default;
+            lateDelivery.Deadline(baseTime, period, baseTime + lag, hz, out _);
+            lateDelivery.Deadline(baseTime + period, period, late, hz, out _);
+            lateDelivery.Deadline(baseTime + 2 * period, period, late + period, hz, out steadySubmitBy);
+            if (steadySubmitBy > late + period) throw new InvalidOperationException("Steady pacing did not catch up to a changed delivery phase.");
+            lateDelivery.Deadline(baseTime + 3 * period, period, late + 2 * period, hz, out steadySubmitBy);
+            if (steadySubmitBy <= late + 2 * period) throw new InvalidOperationException("Steady pacing did not settle on the new delivery phase.");
+
+            // This delivery is late enough to consume the draw budget, but still
+            // close enough to follow the existing capture phase.
+            lateDelivery = default;
+            lateDelivery.Deadline(baseTime, period, baseTime + lag, hz, out _);
+            long refreshPeriod = (long)(10_000_000 / hz);
+            long lateArrival = baseTime + period + lag + Math.Min(period / 2 - 1, refreshPeriod * 4 / 3);
+            long release = lateDelivery.Deadline(baseTime + period, period, lateArrival, hz, out steadySubmitBy);
+            long submittedAt = lateArrival + holdLimit * 4 / 5;
+            if (release != lateArrival || steadySubmitBy <= lateArrival || submittedAt < steadySubmitBy || submittedAt >= release + refreshPeriod)
+                throw new InvalidOperationException("Late delivery and drawing did not share the same refresh budget.");
             cases.Add(new { hz, maximumScheduledGapErrorMs = maxDeviation / 10000.0, maximumHoldMs = maxHold / 10000.0 });
         }
         return cases;
