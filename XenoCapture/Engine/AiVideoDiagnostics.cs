@@ -13,7 +13,17 @@ internal static class AiVideoDiagnostics
     static void Require(bool value,string message){if(!value)throw new InvalidOperationException(message);}
     internal static async Task Run(string folder)
     {
-        Directory.CreateDirectory(folder);var checks=Array.IndexOf(Environment.GetCommandLineArgs(),"--ui-only")>=0?new Dictionary<string,object>():await Task.Run(()=>RunGpu(folder));
+        Directory.CreateDirectory(folder);
+        string[] args = Environment.GetCommandLineArgs();
+        if (Array.IndexOf(args, "--display-detail-only") >= 0)
+        {
+            var detail = await Task.Run(() => CheckAiDisplayDetail(folder));
+            await File.WriteAllTextAsync(Path.Combine(folder, "results.json"),
+                JsonSerializer.Serialize(new { result = "PASS", detail }, new JsonSerializerOptions { WriteIndented = true }));
+            return;
+        }
+
+        var checks=Array.IndexOf(args,"--ui-only")>=0?new Dictionary<string,object>():await Task.Run(()=>RunGpu(folder));
         await File.WriteAllTextAsync(Path.Combine(folder,"gpu-results.json"),JsonSerializer.Serialize(checks,new JsonSerializerOptions{WriteIndented=true}));
         foreach(var item in await RunUi(folder))checks[item.Key]=item.Value;
         checks["result"]="PASS";await File.WriteAllTextAsync(Path.Combine(folder,"results.json"),JsonSerializer.Serialize(checks,new JsonSerializerOptions{WriteIndented=true}));
@@ -143,6 +153,76 @@ internal static class AiVideoDiagnostics
         var valid=AiVideoSettings.Validate(new(true,int.MaxValue,int.MinValue));Require(valid.OutputHeight==0&&valid.Quality==3,"Invalid AI preferences bypassed validation.");
         checks["aiAspectNativeAutoNv12FailureRetryAndIdleRelease"]="pass";return checks;
     }
+    static object CheckAiDisplayDetail(string folder)
+    {
+        using var apartment = new Apartment();
+        var results = new List<object>();
+        foreach (int height in new[] { 1440, 2160 })
+        {
+            int width = height * 16 / 9;
+            using var input = UpscalingDiagnostics.Scene(height / 2);
+            using var reference = UpscalingDiagnostics.Scene(height);
+            using var renderer = new D3DPreview(0, width, height) { RetainFullscreenOutput = true };
+            renderer.AiVideo = new(true, height, 3);
+            renderer.Draw(input, 0);
+            Require(renderer.AiVideoActive, renderer.AiVideoFallbackReason ?? "AI detail test did not load NVIDIA VSR.");
+            byte[] rawModel = renderer.ReadbackAiVideo();
+
+            renderer.EdgeSmoothing = true;
+            renderer.Draw(input, .25);
+            byte[] preview = renderer.Readback();
+            var redraw = new List<double>();
+            var processed = new List<double>();
+            for (int batch = 0; batch < 5; batch++)
+            {
+                var timer = Stopwatch.StartNew();
+                for (int i = 0; i < 120; i++) renderer.RedrawFullscreenMotion();
+                renderer.Readback();
+                redraw.Add(timer.Elapsed.TotalMilliseconds / 120);
+
+                long evaluations = renderer.VsrEvaluations;
+                timer.Restart();
+                for (int i = 0; i < 24; i++) renderer.Draw(input, .25);
+                renderer.Readback();
+                processed.Add(timer.Elapsed.TotalMilliseconds / 24);
+                Require(renderer.VsrEvaluations - evaluations == 24, "The timed workload must process each frame.");
+            }
+            redraw.Sort();
+            processed.Sort();
+
+            long referenceError = 0, modelError = 0, edgePixels = 0;
+            for (int y = height / 4; y < height - 2; y++)
+                for (int x = 2; x < width - 2; x++)
+                {
+                    int index = (y * width + x) * 4;
+                    int horizontal = Math.Abs(reference.Bytes[index + 4] - reference.Bytes[index - 4]);
+                    int vertical = Math.Abs(reference.Bytes[index + width * 4] - reference.Bytes[index - width * 4]);
+                    if (Math.Max(horizontal, vertical) < 6) continue;
+                    for (int channel = 0; channel < 3; channel++)
+                    {
+                        byte expected = reference.Bytes[index + channel];
+                        referenceError += Math.Abs(preview[index + channel] - expected);
+                        modelError += Math.Abs(rawModel[index + channel] - expected);
+                    }
+                    edgePixels++;
+                }
+
+            UpscalingDiagnostics.SavePng(Path.Combine(folder, $"preview-{height}.png"), preview, width, height);
+            results.Add(new
+            {
+                inputHeight = input.Height,
+                outputHeight = height,
+                edgePixels,
+                edgeMeanError = referenceError / (3.0 * edgePixels),
+                modelEdgeMeanError = modelError / (3.0 * edgePixels),
+                modelSha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(rawModel)),
+                redrawMedianMs = redraw[2],
+                processedMedianMs = processed[2]
+            });
+        }
+        return results;
+    }
+
     static object CheckDisplayResampling()
     {
         const int size = 96;

@@ -71,6 +71,7 @@ public partial class MainWindow
         PreviewFrameGeneration.SelectedIndex = settings.Interpolation is >= 0 and <= (int)FrameGenerationMode.RecoverGaps ? settings.Interpolation : 0;
         Capped30GameToggle.IsChecked = settings.Capped30Game;
         SourcePacingToggle.IsChecked = settings.SmoothSourcePacing;
+        SteadyFullscreenPacingToggle.IsChecked = settings.SteadyFullscreenPacing;
         AiVideoResolution.SelectedIndex = settings.AiResolution switch
         {
             720 => 1,
@@ -104,7 +105,8 @@ public partial class MainWindow
             InterfaceMotion: MotionToggle.IsChecked == true,
             FullscreenDisplayDevice: fullscreenDisplayDevice,
             FullscreenEdgeSmoothing: FullscreenEdgeSmoothing.IsChecked == true,
-            SmoothSourcePacing: SelectedSourcePacing);
+            SmoothSourcePacing: SelectedSourcePacing,
+            SteadyFullscreenPacing: SelectedSteadyFullscreenPacing);
     }
 
     void SaveSettings()
@@ -134,5 +136,5 @@ public partial class MainWindow
         }
     }
     void UpdateFolderLabel() { FolderLabel.Text = folder; FolderLabel.ToolTip = folder; }
-    sealed record Preferences(string Folder, string? Video, string? Audio, int Resolution, int Bitrate, double Sharpness, int Upscaling = 0, int Interpolation = 0, bool Capped30Game = false, bool AiEnabled=false,int AiResolution=0,int AiQuality=3,bool LightTheme=false,bool InterfaceSounds=true,bool InterfaceMotion=true, string? FullscreenDisplayDevice = null, bool FullscreenEdgeSmoothing = true, bool SmoothSourcePacing = true);
+    sealed record Preferences(string Folder, string? Video, string? Audio, int Resolution, int Bitrate, double Sharpness, int Upscaling = 0, int Interpolation = 0, bool Capped30Game = false, bool AiEnabled=false,int AiResolution=0,int AiQuality=3,bool LightTheme=false,bool InterfaceSounds=true,bool InterfaceMotion=true, string? FullscreenDisplayDevice = null, bool FullscreenEdgeSmoothing = true, bool SmoothSourcePacing = true, bool SteadyFullscreenPacing = false);
 }

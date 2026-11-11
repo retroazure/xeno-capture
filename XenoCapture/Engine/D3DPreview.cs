@@ -352,7 +352,8 @@ internal sealed unsafe partial class D3DPreview : IDisposable
             if (footprintX > 1.10f || footprintY > 1.10f || footprintX < .85f || footprintY < .85f)
                 parameters = parameters with { AiFootprintX = footprintX, AiFootprintY = footprintY };
         }
-        SetPreviewPixelShader(parameters.AiFootprintX > 0);
+        bool aiFilters = output.AiResampling && (parameters.EdgeStepX > 0 || parameters.Sharpness > .001f);
+        SetPreviewPixelShader(parameters.AiFootprintX > 0 || aiFilters);
         SetGraphicsParameters(parameters);
         // Each flip-discard buffer must be cleared where the video leaves a border.
         if (docking || transitioning || (long)width * output.SourceHeight != (long)height * output.SourceWidth)
@@ -364,13 +365,12 @@ internal sealed unsafe partial class D3DPreview : IDisposable
         ((delegate* unmanaged[Stdcall]<nint, uint, Viewport*, void>)context.Slot(44))(context.P, 1, &viewport);
         ((delegate* unmanaged[Stdcall]<nint, uint, uint, void>)context.Slot(13))(context.P, 3, 0);
     }
-    public bool Present(bool allowBlocking, bool syncToDisplay)
+    public bool Present(bool allowBlocking, uint syncInterval)
     {
         if (swap == null) return true;
         const int stillDrawing = unchecked((int)0x887A000A);
         const uint doNotWait = 0x8;
-        // Keep a submitted image for at least one refresh when display sync is enabled.
-        uint syncInterval = syncToDisplay ? 1u : 0u;
+
         int status;
         if (allowBlocking)
         {

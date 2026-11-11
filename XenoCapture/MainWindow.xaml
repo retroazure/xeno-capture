@@ -197,6 +197,10 @@
                   <CheckBox x:Name="SourcePacingToggle" Content="Sync preview to display" IsChecked="True" Margin="0,9,0,0"
                             Checked="SourcePacingChanged" Unchecked="SourcePacingChanged"
                             ToolTip="Synchronize preview presentation to the display refresh. With frame generation off or set to Gap recovery, early frames may wait briefly to even out their spacing."/>
+                  <CheckBox x:Name="SteadyFullscreenPacingToggle" Content="Steady fullscreen cadence" Margin="0,9,0,0"
+                            Checked="SteadyFullscreenPacingChanged" Unchecked="SteadyFullscreenPacingChanged"
+                            IsEnabled="{Binding IsChecked, ElementName=SourcePacingToggle}"
+                            ToolTip="With frame generation off, space captured frames evenly on matching displays, such as 60 FPS on 180 Hz or 240 Hz. May hold early frames for up to one display refresh."/>
                 </StackPanel>
               </Border>
               <TextBlock Text="Fullscreen display" Style="{StaticResource Label}" Margin="0,13,0,6"/>

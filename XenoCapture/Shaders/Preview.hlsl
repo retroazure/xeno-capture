@@ -51,14 +51,47 @@ float3 resampleAi(float2 uv) {
  }
  return result;
 }
+float3 filterAi(float2 uv, float3 center) {
+ // One AI texel is enough to follow diagonal edges without averaging away
+ // the detail recovered between the original capture pixels.
+ float4 neighbors = float4(
+  luma(image.SampleLevel(linearClamp, uv, 0, int2(0,-1)).rgb),
+  luma(image.SampleLevel(linearClamp, uv, 0, int2(0, 1)).rgb),
+  luma(image.SampleLevel(linearClamp, uv, 0, int2(1, 0)).rgb),
+  luma(image.SampleLevel(linearClamp, uv, 0, int2(-1,0)).rgb));
+ float y = luma(center);
+ float low = min(y, min(min(neighbors.x, neighbors.y), min(neighbors.z, neighbors.w)));
+ float high = max(y, max(max(neighbors.x, neighbors.y), max(neighbors.z, neighbors.w)));
+ float range = high - low;
+ float2 gradient = float2(neighbors.z - neighbors.w, neighbors.y - neighbors.x);
+ float diagonal = min(abs(gradient.x), abs(gradient.y));
+ float reduction = max(1, max(aiFootprint.x, aiFootprint.y));
+ float edgeBlend = 0;
+ [branch] if (flags.z > 0 && diagonal > max(.035, range * .20)) {
+  float2 tangent = float2(-gradient.y, gradient.x) / max(abs(gradient.x), abs(gradient.y));
+  float2 step = tangent / p.xy;
+  edgeBlend = .32 * smoothstep(.035, .16, diagonal) / reduction;
+  center = lerp(center, (aiTap(uv - step) + aiTap(uv + step)) * .5, edgeBlend);
+ }
+
+ // Sharpen luma within the measured neighborhood so dark and bright
+ // outlines cannot overshoot the values already in the AI output.
+ float filtered = luma(center);
+ // Leave strong edges from the model intact. Spend the sharpening range
+ // on lower-contrast texture, where an outline would be less visible.
+ float strength = p.z * (1 - smoothstep(.08, .30, range)) * (1 - edgeBlend) / reduction;
+ float correction = (filtered - dot(neighbors, .25)) * strength;
+ return saturate(center + clamp(correction, min(0, low - filtered), max(0, high - filtered)));
+}
 #endif
 
 float4 Preview(float4 pos:SV_POSITION,float2 uv:TEXCOORD):SV_TARGET {
 #ifdef AI_RESAMPLING
- float3 c=resampleAi(uv);
+ float3 aiColor = aiFootprint.x > 0 ? resampleAi(uv) : aiTap(uv);
+ [branch] if (flags.z > 0 || p.z > .001) aiColor = filterAi(uv, aiColor);
+ return float4(aiColor, 1);
 #else
  float3 c=color(uv);
-#endif
  float edgeBlend=0;
  [branch] if(flags.z>0) {
   float2 d=flags.zw;
@@ -81,4 +114,5 @@ float4 Preview(float4 pos:SV_POSITION,float2 uv:TEXCOORD):SV_TARGET {
   c=clamp(c+(c-(n+s+e+w)*.25)*p.z*(1-edgeBlend),min(c,min(min(n,s),min(e,w))),max(c,max(max(n,s),max(e,w))));
  }
  return float4(c,1);
+#endif
 }

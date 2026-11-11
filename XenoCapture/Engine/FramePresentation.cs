@@ -58,6 +58,42 @@ internal readonly record struct SourceFramePacing(long Time, long Duration, long
         Math.Min(60_000, Math.Min(duration / 3, (long)refreshPeriod));
 }
 
+internal struct FullscreenSourceCadence
+{
+    long previousTime, previousDuration, expectedArrival;
+
+    internal static uint RefreshInterval(long duration, double refreshHz)
+    {
+        if (!SourceFramePacing.HasRefreshHeadroom(refreshHz, duration)) return 0;
+        double refreshes = duration * refreshHz / 10_000_000;
+        double whole = Math.Round(refreshes);
+        return whole is >= 2 and <= 4 && Math.Abs(refreshes - whole) <= .05 ? (uint)whole : 0;
+    }
+
+    internal long Deadline(long time, long duration, long arrival, double refreshHz, out bool reanchored)
+    {
+
+        long gap = time - previousTime;
+        bool continuous = previousDuration != 0 && gap >= duration * 3 / 4 && gap <= duration * 5 / 4
+            && Math.Abs(previousDuration - duration) <= duration / 32;
+        previousTime = time;
+        previousDuration = duration;
+        long error = arrival - (expectedArrival + duration);
+        reanchored = !continuous || error < -duration / 2 || error > duration / 2;
+        if (reanchored)
+        {
+            expectedArrival = arrival;
+            return arrival;
+        }
+
+        // Follow slow drift between the capture and PC clocks. A short
+        // reserve absorbs delivery jitter while retaining the newest-frame slot.
+        expectedArrival += duration + error / 32;
+        long holdLimit = Math.Min(60_000, (long)(10_000_000 / refreshHz));
+        return Math.Clamp(expectedArrival + holdLimit * 2 / 3, arrival, arrival + holdLimit);
+    }
+}
+
 internal static class FrameGenerationPolicy
 {
     internal static int Multiplier(FrameGenerationMode mode) => mode switch

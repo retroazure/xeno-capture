@@ -35,6 +35,7 @@ public partial class MainWindow
     internal void DiagnosticSelectCapped30Game(bool enabled) => Capped30GameToggle.IsChecked=enabled;
     internal FrameGenerationMode DiagnosticFrameGeneration => SelectedFrameGeneration;
     internal void DiagnosticSetSourcePacing(bool enabled) => SourcePacingToggle.IsChecked = enabled;
+    internal void DiagnosticSetSteadyFullscreenPacing(bool enabled) => SteadyFullscreenPacingToggle.IsChecked = enabled;
     internal void DiagnosticSelectFrameGeneration(FrameGenerationMode mode) => PreviewFrameGeneration.SelectedIndex = (int)mode;
     internal PreviewUpscaler DiagnosticUpscaler => SelectedUpscaler;
     internal XenoCapture.UI.Direct3DHost DiagnosticEmbedded => embeddedPreview;
@@ -73,6 +74,7 @@ public partial class MainWindow
             DiagnosticMaximizeFullscreen();
         }
     }
+    internal Task DiagnosticFullscreenOnDisplay(System.Drawing.Rectangle bounds) => ToggleFullscreenOnDisplay(() => bounds);
     internal void DiagnosticMaximizeFullscreen()
     {
         if (fullscreen != null) fullscreen.WindowState = WindowState.Maximized;

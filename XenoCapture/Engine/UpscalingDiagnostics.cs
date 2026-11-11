@@ -249,13 +249,15 @@ internal static class UpscalingDiagnostics
         for (int row = 0; row < height; row++) Array.Copy(pixels, ((y + row) * strideWidth + x) * 4, crop, row * width * 4, width * 4);
         SavePng(path, crop, width, height);
     }
-    static unsafe Packet Scene()
+    internal static unsafe Packet Scene(int height = 1080)
     {
-        const int width = 1920, height = 1080; var frame = new Packet(width * height * 4, false, width, height);
+        int width = height * 16 / 9;
+        var frame = new Packet(width * height * 4, false, width, height);
         fixed (byte* data = frame.Bytes)
         {
             using var bitmap = new Drawing.Bitmap(width, height, width * 4, Drawing.Imaging.PixelFormat.Format32bppArgb, (nint)data);
             using var graphics = Drawing.Graphics.FromImage(bitmap); graphics.Clear(Drawing.Color.FromArgb(20, 29, 44));
+            if (height != 1080) graphics.ScaleTransform(height / 1080f, height / 1080f);
             graphics.SmoothingMode = Drawing.Drawing2D.SmoothingMode.AntiAlias;
             graphics.TextRenderingHint = Drawing.Text.TextRenderingHint.AntiAliasGridFit;
             using var green = new Drawing.SolidBrush(Drawing.Color.FromArgb(186, 242, 121));
@@ -266,8 +268,8 @@ internal static class UpscalingDiagnostics
             graphics.DrawString("1080p input  |  Edges, text and fine detail", small, green, 74, 128);
             using var grid = new Drawing.Pen(Drawing.Color.FromArgb(60, 86, 108), 1);
             using var contour = new Drawing.Pen(Drawing.Color.FromArgb(186, 242, 121), 2);
-            for (int x = 0; x < width; x += 28) graphics.DrawLine(grid, 960, 340, x, 1080);
-            for (int y = 420; y < height; y += 33) graphics.DrawLine(grid, 0, y, width, y);
+            for (int x = 0; x < 1920; x += 28) graphics.DrawLine(grid, 960, 340, x, 1080);
+            for (int y = 420; y < 1080; y += 33) graphics.DrawLine(grid, 0, y, 1920, y);
             for (int i = 0; i < 8; i++) graphics.DrawEllipse(contour, 220 + i * 21, 280 + i * 13, 380 - i * 22, 380 - i * 22);
             graphics.DrawLines(contour, new[] { new Drawing.Point(920, 740), new Drawing.Point(1250, 280), new Drawing.Point(1460, 700), new Drawing.Point(1740, 370) });
             graphics.DrawString("1440p / 4K preview", font, white, 1030, 790);

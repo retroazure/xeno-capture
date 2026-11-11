@@ -52,6 +52,12 @@ internal sealed class Direct3DHost : HwndHost
         get => Volatile.Read(ref smoothSourcePacing);
         set { lock (gate) { if (!stopping) { Volatile.Write(ref smoothSourcePacing, value); signal.Set(); } } }
     }
+    bool steadyFullscreenPacing;
+    internal bool SteadyFullscreenPacing
+    {
+        get => Volatile.Read(ref steadyFullscreenPacing);
+        set { lock (gate) { if (!stopping) { Volatile.Write(ref steadyFullscreenPacing, value); signal.Set(); } } }
+    }
     public long GeneratedPresentations => Interlocked.Read(ref generatedPresentations);
     public long RepeatedPresentations => Interlocked.Read(ref repeatedPresentations);
     internal double DiagnosticRefreshRate { get; set; }
@@ -210,6 +216,7 @@ internal sealed class Direct3DHost : HwndHost
             bool entryTimerUnavailable=false;
             bool sourcePacingTimerUnavailable = false;
             SourceFramePacing sourcePacing = default;
+            FullscreenSourceCadence steadyCadence = default;
             nint renderSignal = signal.SafeWaitHandle.DangerousGetHandle();
             long period = 0, sourceCapturePeriod=0, refreshChecked = 0;
             int sourceWidth = 0, sourceHeight = 0, multiplier = 2; double refreshHz = 0; string? timingFailure = null;
@@ -294,10 +301,10 @@ internal sealed class Direct3DHost : HwndHost
                     gpu.PresentationScale = FullscreenMotion.Scale(started == 0 ? 0 : Clock.Now - started);
                 }
             }
-            bool Publish(PresentedFrame frame, bool restoreSource = false)
+            bool Publish(PresentedFrame frame, bool restoreSource = false, uint refreshInterval = 1)
             {
                 bool accepted = gpu.Present(allowBlocking: frame.Kind == PresentationKind.Source || restoreSource,
-                    syncToDisplay: SmoothSourcePacing);
+                    syncInterval: SmoothSourcePacing ? refreshInterval : 0);
                 LastSubmissionMs = gpu.LastUploadDrawMs;
                 Volatile.Write(ref enhancedUpscalingActive, gpu.UsedEnhancedUpscaling); Volatile.Write(ref rtxVideoRequested,gpu.RtxVideoRequested); Volatile.Write(ref upscalingFallbackReason, gpu.UpscalingFallbackReason);
                 PublishAiStatus();
@@ -459,6 +466,7 @@ internal sealed class Direct3DHost : HwndHost
                     timingFailure=null;previousMode=requested;previousContent30=content30;cadenceDue=0;cadenceStep=0;Volatile.Write(ref frameGenerationActive,false);
                     predictionDue = 0; predictionShown = false;
                     sourcePacing = default;
+                    steadyCadence = default;
                     lock(gate){inactiveWaiter?.TrySetResult();inactiveWaiter=null;}
                     signal.WaitOne();continue;
                 }
@@ -516,12 +524,19 @@ internal sealed class Direct3DHost : HwndHost
                 }
                 bool generating = false;
                 bool paceSource = (requested == FrameGenerationMode.Off || recoveringGaps) && SmoothSourcePacing;
+                bool steadySource = isFullscreen && paceSource && requested == FrameGenerationMode.Off
+                    && SteadyFullscreenPacing && !entryAnimating;
+                if (!steadySource) steadyCadence = default;
                 if ((multiplier > 1 || predictionRequested || paceSource) && (pending || gpu.HasInterpolationFrame))
                 {
                     if (Clock.Now - refreshChecked > 10_000_000 || refreshChecked == 0)
                     {
                         double currentRefresh = DiagnosticRefreshRate > 0 ? DiagnosticRefreshRate : DisplayTiming.RefreshRate(window);
-                        if (refreshHz != currentRefresh) sourcePacing = default;
+                        if (refreshHz != currentRefresh)
+                        {
+                            sourcePacing = default;
+                            steadyCadence = default;
+                        }
                         refreshHz = currentRefresh;
                         refreshChecked = Clock.Now;
                     }
@@ -626,14 +641,26 @@ internal sealed class Direct3DHost : HwndHost
                     if (!Slot() || !Alive() || FrameGeneration != requested || Capped30Game != content30) continue;
                     // ResizeBuffers can stall. Keep the capture slot replaceable until it completes.
                     PrepareDraw();
-                    bool prepareAhead = isFullscreen && paceSource && gpu.AiVideo.Enabled
+                    uint clockInterval = steadySource ? FullscreenSourceCadence.RefreshInterval(candidatePeriod, refreshHz) : 0;
+                    if (clockInterval == 0) steadyCadence = default;
+                    bool prepareAhead = isFullscreen && paceSource && (gpu.AiVideo.Enabled || clockInterval != 0)
                         && !entryAnimating && !sourcePacingTimerUnavailable;
                     if (paceSource && !prepareAhead && WaitForSourcePacing()) continue;
                     DiagnosticBeforeFrameLatch?.Invoke();
                     using var frame = TakeLatest();
                     if (frame == null) { Interlocked.Increment(ref skippedAfterWait); continue; }
-                    long sourceDue = prepareAhead
-                        ? SourcePacingDeadline(frame, consumedArrival, LastSourceDisplayTime(), prepareAhead: true) : 0;
+                    uint sourceInterval = prepareAhead && clockInterval != 0
+                        ? FullscreenSourceCadence.RefreshInterval(frame.Duration, refreshHz) : 0;
+                    long sourceDue = 0;
+                    if (sourceInterval != 0)
+                    {
+                        sourceDue = steadyCadence.Deadline(frame.Time, frame.Duration, consumedArrival, refreshHz, out bool reanchored);
+                        if (reanchored) sourceInterval = 0;
+                    }
+                    else if (prepareAhead)
+                    {
+                        sourceDue = SourcePacingDeadline(frame, consumedArrival, LastSourceDisplayTime(), prepareAhead: true);
+                    }
                     long featureCreations = gpu.VsrFeatureCreations;
                     bool DrawLiveSource(Packet source, bool allowRepeatSkip)
                     {
@@ -663,16 +690,21 @@ internal sealed class Direct3DHost : HwndHost
                     if (fresh != null) DrawLiveSource(fresh, allowRepeatSkip: false);
                     else if (sourceDue > Clock.Now && SmoothSourcePacing && FrameGeneration == requested && Alive())
                     {
-                        // Give the AI draw the pacing window as GPU time, then present on the usual refresh.
+                        // Start GPU work during the hold so it can finish before the present deadline.
                         gpu.SubmitPendingDraw();
-                        while (sourceDue > Clock.Now && SmoothSourcePacing && FrameGeneration == requested && Alive())
+                        while (sourceDue > Clock.Now && SmoothSourcePacing && FrameGeneration == requested
+                            && (sourceInterval == 0 || SteadyFullscreenPacing) && Alive())
                         {
                             if (!WaitForSourceDeadline(sourceDue)) break;
                         }
                     }
                     if (!Alive()) continue;
                     var shown = fresh ?? frame;
-                    bool accepted = Publish(new PresentedFrame(shown.Time, shown.Duration));
+                    // A missed deadline should let the next capture catch up at the next refresh.
+                    uint refreshInterval = sourceInterval != 0 && fresh == null && SteadyFullscreenPacing
+                        && FrameGeneration == requested && Clock.Now - sourceDue < shown.Duration / sourceInterval
+                        ? sourceInterval : 1;
+                    bool accepted = Publish(new PresentedFrame(shown.Time, shown.Duration), refreshInterval: refreshInterval);
                     if (accepted && (requested == FrameGenerationMode.Off || recoveringGaps))
                     {
                         uint? presentCount = isFullscreen && paceSource && !entryAnimating

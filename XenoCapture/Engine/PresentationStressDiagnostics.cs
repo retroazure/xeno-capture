@@ -39,6 +39,7 @@ internal static class PresentationStressDiagnostics
         var checks = new Dictionary<string, object>();
         CheckSourcePacingPolicy();
         checks["sourcePacingPolicy"] = "pass";
+        checks["steadyFullscreenCadencePolicy"] = CheckSteadyFullscreenCadence();
         void Save() => File.WriteAllText(Path.Combine(folder, "results.json"), JsonSerializer.Serialize(checks, new JsonSerializerOptions { WriteIndented = true }));
         void Stage(string text) => File.WriteAllText(Path.Combine(folder, "stage.txt"), text);
         if (Array.IndexOf(Environment.GetCommandLineArgs(), "--startup-latency-only") >= 0)
@@ -67,6 +68,15 @@ internal static class PresentationStressDiagnostics
         {
             Stage("4K Ultra fullscreen motion pacing");
             checks["aiMotionPlayback"] = await RunNativePlayback(aiMotion: true);
+            checks["result"] = "PASS";
+            Stage("complete");
+            Save();
+            return;
+        }
+        if (Array.IndexOf(Environment.GetCommandLineArgs(), "--steady-pacing-only") >= 0)
+        {
+            Stage("steady fullscreen source cadence");
+            checks["steadyFullscreenPlayback"] = await RunNativePlayback(steadyOnly: true);
             checks["result"] = "PASS";
             Stage("complete");
             Save();
@@ -278,10 +288,47 @@ internal static class PresentationStressDiagnostics
             throw new InvalidOperationException("Display pacing did not respect the refresh phase or hold limit.");
     }
 
-    static async Task<Dictionary<string, object>> RunNativePlayback(bool aiMotion = false)
+    static object CheckSteadyFullscreenCadence()
+    {
+        const long period = 166_667, baseTime = 1_000_000, lag = 8_000, jitter = 30_000;
+        if (FullscreenSourceCadence.RefreshInterval(period, 144) != 0 || FullscreenSourceCadence.RefreshInterval(period, 0) != 0
+            || FullscreenSourceCadence.RefreshInterval(period, 60) != 0
+            || FullscreenSourceCadence.RefreshInterval(166_833, 180) != 3 || FullscreenSourceCadence.RefreshInterval(166_833, 240) != 4)
+            throw new InvalidOperationException("Steady pacing accepted an incompatible refresh rate or rejected 59.94 FPS.");
+        var cases = new List<object>();
+        foreach (double hz in new[] { 120d, 180d, 240d })
+        {
+            if (FullscreenSourceCadence.RefreshInterval(period, hz) != (uint)Math.Round(hz / 60))
+                throw new InvalidOperationException("Steady pacing rejected a matching refresh rate.");
+            FullscreenSourceCadence cadence = default;
+            long previousDue = 0, maxDeviation = 0, maxHold = 0;
+            long holdLimit = Math.Min(60_000, (long)(10_000_000 / hz));
+            for (int i = 0; i < 240; i++)
+            {
+                long time = baseTime + i * period;
+                long arrival = time + lag + (i % 2) * jitter;
+                long due = cadence.Deadline(time, period, arrival, hz, out _);
+                if (due < arrival || due > arrival + holdLimit)
+                    throw new InvalidOperationException("Steady pacing exceeded its hold limit.");
+                if (i > 60) maxDeviation = Math.Max(maxDeviation, Math.Abs(due - previousDue - period));
+                maxHold = Math.Max(maxHold, due - arrival);
+                previousDue = due;
+            }
+            if (maxDeviation > 8_000)
+                throw new InvalidOperationException("Steady pacing did not smooth alternating input jitter.");
+            long missedFrame = baseTime + 241 * period;
+            if (cadence.Deadline(missedFrame, period, missedFrame + lag, hz, out bool reanchored) != missedFrame + lag || !reanchored)
+                throw new InvalidOperationException("Steady pacing held a frame after a dropped input.");
+            cases.Add(new { hz, maximumScheduledGapErrorMs = maxDeviation / 10000.0, maximumHoldMs = maxHold / 10000.0 });
+        }
+        return cases;
+    }
+
+    static async Task<Dictionary<string, object>> RunNativePlayback(bool aiMotion = false, bool steadyOnly = false)
     {
         const long period = 166667, arrivalJitter = 30_000;
-        var source = new PacedVideoBackend(1920, 1080, arrivalJitter, pan: aiMotion);
+        bool steadyAi = steadyOnly && Array.IndexOf(Environment.GetCommandLineArgs(), "--steady-pacing-ai") >= 0;
+        var source = new PacedVideoBackend(1920, 1080, arrivalJitter, pan: aiMotion || steadyOnly);
         var main = new MainWindow(false, false, (_, _) => new CaptureStream(() => source, TimeSpan.FromSeconds(2)))
             { ShowActivated = false };
         main.Show();
@@ -318,7 +365,7 @@ internal static class PresentationStressDiagnostics
                 host.DiagnosticDisplayFrame += OnDisplay;
                 long initialPacingWaits = host.SourcePacingWaits;
                 var elapsed = Stopwatch.StartNew();
-                try { await Task.Delay(aiMotion ? 6000 : 3000); }
+                try { await Task.Delay(aiMotion || steadyOnly ? 6000 : 3000); }
                 finally
                 {
                     host.FramePresented -= OnPresent;
@@ -380,6 +427,41 @@ internal static class PresentationStressDiagnostics
                     ["fullscreenWidth"] = displayBounds.Width, ["fullscreenHeight"] = displayBounds.Height,
                     ["aiVideo"] = aiHost.AiVideoStatus, ["injectedAlternateDelayMs"] = arrivalJitter / 10000.0,
                     ["fullscreen"] = sample
+                };
+            }
+            if (steadyOnly)
+            {
+                await WaitFor(() => main.DiagnosticHasFrame);
+                if (steadyAi) main.DiagnosticSelectAiVideo(true, 1440, 3);
+                var displays = new List<object>();
+                foreach (var screen in System.Windows.Forms.Screen.AllScreens)
+                {
+                    double hz = DisplayTiming.RefreshRateForDevice(screen.DeviceName);
+                    if (FullscreenSourceCadence.RefreshInterval(period, hz) == 0) continue;
+                    await main.DiagnosticFullscreenOnDisplay(screen.Bounds);
+                    var host = main.DiagnosticPreview ?? throw new InvalidOperationException("No fullscreen host for steady pacing.");
+                    if (steadyAi) await WaitFor(() => host.AiVideoActive);
+                    var ordinary = await Sample(host);
+
+                    main.DiagnosticSetSteadyFullscreenPacing(true);
+                    string steadySettings = main.DiagnosticSettingsJson;
+                    main.DiagnosticSetSteadyFullscreenPacing(false);
+                    main.DiagnosticApplySettingsJson(steadySettings);
+                    if (!host.SteadyFullscreenPacing || main.DiagnosticEmbedded.SteadyFullscreenPacing)
+                        throw new InvalidOperationException("The saved cadence preference did not apply only to the fullscreen host.");
+                    var steady = await Sample(host);
+                    if (steady["sourcePacingWaits"] == 0)
+                        throw new InvalidOperationException("Steady cadence never scheduled a display hold.");
+
+                    main.DiagnosticSetSteadyFullscreenPacing(false);
+                    var ordinaryRepeat = await Sample(host);
+                    await main.DiagnosticWindowed();
+                    displays.Add(new { hz, screen.Bounds.Width, screen.Bounds.Height, aiVideo = host.AiVideoStatus, ordinary, steady, ordinaryRepeat });
+                }
+                return new()
+                {
+                    ["displays"] = displays, ["injectedAlternateDelayMs"] = arrivalJitter / 10000.0,
+                    ["measuresPhysicalPixelResponse"] = false
                 };
             }
             var windowed = await Sample(main.DiagnosticPreview ?? throw new InvalidOperationException("No windowed preview host."));

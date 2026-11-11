@@ -18,6 +18,7 @@ public partial class MainWindow
             Upscaler = SelectedUpscaler,
             FrameGeneration = SelectedFrameGeneration,
             SmoothSourcePacing = SelectedSourcePacing,
+            SteadyFullscreenPacing = isFullscreen && SelectedSteadyFullscreenPacing,
             Capped30Game = SelectedCapped30Game,
             AiVideo = SelectedAiVideo,
             EdgeSmoothing = isFullscreen && FullscreenEdgeSmoothing.IsChecked == true
@@ -96,6 +97,12 @@ public partial class MainWindow
         if (embeddedPreview != null) embeddedPreview.SmoothSourcePacing = SelectedSourcePacing;
         if (fullscreenPreview != null) fullscreenPreview.SmoothSourcePacing = SelectedSourcePacing;
         UpdateUpscalingStatus(); if (IsLoaded) SaveSettings();
+    }
+    bool SelectedSteadyFullscreenPacing => SteadyFullscreenPacingToggle?.IsChecked == true;
+    void SteadyFullscreenPacingChanged(object sender, RoutedEventArgs e)
+    {
+        if (fullscreenPreview != null) fullscreenPreview.SteadyFullscreenPacing = SelectedSteadyFullscreenPacing;
+        if (IsLoaded) SaveSettings();
     }
     bool SelectedCapped30Game => Capped30GameToggle?.IsChecked==true;
     void Capped30GameChanged(object sender,RoutedEventArgs e)

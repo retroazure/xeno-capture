@@ -52,9 +52,22 @@ internal sealed unsafe partial class D3DPreview
             CheckVsr(rtxApi.VsrCreate(device.P,rtxApi.Directory,cache,out rtxSession),"Create NVIDIA VSR");VsrFeatureCreations++;
         }
         else CheckVsr(rtxApi!.VsrSynchronize(rtxSession),"Complete NVIDIA VSR before resize");
-        ClearPixelInputs();ClearComputeBindings();rtxOutput?.Dispose();rtxRgb?.Dispose();rtxOutput=rtxRgb=null;lastVsrImage=null;
-        rtxSourceWidth=iw;rtxSourceHeight=ih;rtxOutputWidth=ow;rtxOutputHeight=oh;
-        rtxRgb=new GpuSurface(this,iw,ih,true);rtxOutput=new GpuSurface(this,ow,oh,false);
+        ClearPixelInputs();
+        ClearComputeBindings();
+        rtxOutput?.Dispose();
+        rtxOutput = null;
+        lastVsrImage = null;
+        if (rtxRgb == null || iw != rtxSourceWidth || ih != rtxSourceHeight)
+        {
+            rtxRgb?.Dispose();
+            rtxRgb = null;
+            rtxRgb = new GpuSurface(this, iw, ih, true);
+        }
+        rtxOutput = new GpuSurface(this, ow, oh, false);
+        rtxSourceWidth = iw;
+        rtxSourceHeight = ih;
+        rtxOutputWidth = ow;
+        rtxOutputHeight = oh;
     }
     Com PrepareVsrInput(ImageSource source)
     {
