@@ -25,6 +25,7 @@ internal sealed class Direct3DHost : HwndHost
     bool stopping, active;
     int pixelWidth = 1, pixelHeight = 1;
     long viewportChangedAt;
+    ulong fullscreenViewportSize;
     double sharpness;
     int generationMode; string frameGenerationStatus = "Off"; bool frameGenerationActive;
     long generatedPresentations, repeatedPresentations;
@@ -143,7 +144,33 @@ internal sealed class Direct3DHost : HwndHost
         Volatile.Write(ref pixelWidth, width);
         Volatile.Write(ref pixelHeight, height);
         Volatile.Write(ref viewportChangedAt, Clock.Now);
+        WakeWhenFullscreenViewportReady();
     }
+
+    internal void SetFullscreenViewportSize(int width, int height)
+    {
+        ulong size = Keys.Pair(width, height);
+        if (Volatile.Read(ref fullscreenViewportSize) == size) return;
+        Volatile.Write(ref fullscreenViewportSize, size);
+        WakeWhenFullscreenViewportReady();
+    }
+
+    bool FullscreenViewportReady()
+    {
+        ulong size = Volatile.Read(ref fullscreenViewportSize);
+        return size != 0 && size == Keys.Pair(Volatile.Read(ref pixelWidth), Volatile.Read(ref pixelHeight));
+    }
+
+    void WakeWhenFullscreenViewportReady()
+    {
+        if (!isFullscreen || FrameGeneration != FrameGenerationMode.Off ||
+            AiVideo is not { Enabled: true, OutputHeight: 0 } || !FullscreenViewportReady()) return;
+        lock (gate)
+        {
+            if (!stopping && active && latest?.Layout == PixelLayout.Nv12) signal.Set();
+        }
+    }
+
     protected override HandleRef BuildWindowCore(HandleRef parent)
     {
         lock (gate)
@@ -445,10 +472,12 @@ internal sealed class Direct3DHost : HwndHost
             {
                 bool enabled, pending;
                 long candidatePeriod;
+                PixelLayout? candidateLayout;
                 int candidateWidth, candidateHeight;
                 lock (gate)
                 {
                     if (stopping) break; enabled = active; pending = enabled && latest != null;
+                    candidateLayout = latest?.Layout;
                     candidatePeriod = latest?.Duration ?? sourceCapturePeriod; candidateWidth = latest?.Width ?? sourceWidth; candidateHeight = latest?.Height ?? sourceHeight;
                 }
                 var requested = FrameGeneration; multiplier = FrameGenerationPolicy.Multiplier(requested); content30=Capped30Game;
@@ -492,7 +521,8 @@ internal sealed class Direct3DHost : HwndHost
                 {
                     // Auto sizes inference to the fullscreen viewport. Avoid
                     // presenting at a transient size immediately before DXGI resize.
-                    if (isFullscreen && AiVideo is { Enabled: true, OutputHeight: 0 })
+                    if (isFullscreen && AiVideo is { Enabled: true, OutputHeight: 0 }
+                        && !(requested == FrameGenerationMode.Off && candidateLayout == PixelLayout.Nv12 && FullscreenViewportReady()))
                     {
                         long readyAt = Math.Min(viewportWaitLimit, Volatile.Read(ref viewportChangedAt) + 120_000);
                         if (Clock.Now < readyAt)

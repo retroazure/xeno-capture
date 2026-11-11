@@ -61,6 +61,7 @@ internal sealed class PreviewWindow : Window
         if (stopping || displayBounds == null || source == null || source.IsDisposed) return;
         var bounds = displayBounds();
         if (!PositionWindow(source.Handle, bounds)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        host.SetFullscreenViewportSize(bounds.Width, bounds.Height);
     }
 
     internal static bool PositionWindow(nint hwnd, Rectangle bounds)
