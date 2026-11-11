@@ -2,7 +2,7 @@ using System;
 using System.Threading;
 
 namespace XenoCapture.Engine;
-internal sealed class FrameGenerationTestSource(int framesPerSecond = 30, int gameFramesPerSecond = 0, int dropEvery = 0) : ICaptureBackend
+internal sealed class FrameGenerationTestSource(int framesPerSecond = 30, int gameFramesPerSecond = 0, int dropEvery = 0, int width = 640, int height = 360) : ICaptureBackend
 {
     readonly object gate = new(); readonly AutoResetEvent stopped = new(false);
     FrameDeadlineWaiter? timer; bool disposed; volatile bool stopping;
@@ -24,7 +24,7 @@ internal sealed class FrameGenerationTestSource(int framesPerSecond = 30, int ga
         long gameIndex=gameFramesPerSecond>0 ? (index-1)*gameFramesPerSecond/framesPerSecond+1 : index;
         if (HoldMotion) { if (!holding) heldGameIndex=gameIndex; gameIndex=heldGameIndex; holding=true; } else holding=false;
         if (gameIndex!=lastGameIndex) Interlocked.Increment(ref uniqueFrames); lastGameIndex=gameIndex;
-        var packet = FrameGenerationDiagnostics.Pattern((int)(gameIndex * 16 % 640));
+        var packet = FrameGenerationDiagnostics.Pattern((int)(gameIndex * 16 % width), width, height);
         packet.Time = origin + nextSlot++ * period;
         if (dropEvery > 1 && nextSlot % dropEvery == dropEvery - 1) nextSlot++;
         packet.Duration = period; next = Math.Max(origin + nextSlot * period, Clock.Now);

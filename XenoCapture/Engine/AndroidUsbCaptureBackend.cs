@@ -7,7 +7,9 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
@@ -22,9 +24,6 @@ internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playA
     const string HelperFolder = "android";
     static readonly (string Name, string Sha256)[] HelperFiles =
     [
-        ("adb.exe", "B4A6B455702684652CCCF7B46258B29E653538904359A58FD4931CF3EF286B3F"),
-        ("AdbWinApi.dll", "C1D653030B4BDE65D3E07E4D0B0979E17BE56DF1436CDD15528630F27808050D"),
-        ("AdbWinUsbApi.dll", "0710E894D9B40F71A670C13C694079D564C92C1279DA382CFE4850983AAEBE1B"),
         ("avcodec-63.dll", "159928E3BBE7BEACA046CCF831FDF44F1E5559C0E63417F007889A6BB2C5DE88"),
         ("avformat-63.dll", "4DBB0C1C8262F7AE45E7EDC4866E26F53B358BF4FC7A0B971F15D1F2D7BAF22F"),
         ("avutil-61.dll", "52EB504CED0EA6D9E936D348DF51C8AAEEC1CAE8FA4A7DBA339FEA87D7CCE725"),
@@ -41,15 +40,17 @@ internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playA
     CancellationToken cancellation;
     AndroidProcessJob? job;
     VerifiedPackage? package;
-    Process? adb, scrcpy;
+    FileStream? previewClient;
+    AndroidPreviewBridge? bridge;
+    Process? scrcpy;
     readonly object playbackGate = new();
     bool playbackClosing;
     WindowCaptureBackend? capture;
 
-    int port;
     string folder = "";
-    internal int ServerPort => port;
-    internal int ServerProcessId { get; private set; }
+    internal AndroidPreviewBridge? PreviewBridge => bridge;
+    internal AndroidProcessJob? PreviewJob => job;
+    internal string? SessionHelperDirectory => package?.Folder;
 
     public PixelLayout Layout => PixelLayout.Bgr32;
     public int AudioRate => 0;
@@ -61,66 +62,42 @@ internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playA
     public void Open(CancellationToken token)
     {
         cancellation = token;
-        folder = Path.Combine(AppContext.BaseDirectory, HelperFolder);
-        package = new VerifiedPackage(folder, token);
+        package = new VerifiedPackage(Path.Combine(AppContext.BaseDirectory, HelperFolder), token);
+        folder = package.Folder;
+        // scrcpy starts this executable as a command shim. Keep its file pinned
+        // for the lifetime of the job, just like the other helper files.
+        string executable = Path.Combine(AppContext.BaseDirectory, "XenoCapture.exe");
+        if ((File.GetAttributes(executable) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("The Android USB preview needs a local XenoCapture.exe.");
+        previewClient = File.OpenRead(executable);
         job = new AndroidProcessJob();
-        // An ephemeral port avoids taking over an existing adb server.
-        adb = job.Start(HelperProcess("adb.exe", "-L", "tcp:0", "server", "nodaemon"));
-        ServerProcessId = adb.Id;
-        long start = Stopwatch.GetTimestamp();
-        do
-        {
-            token.ThrowIfCancellationRequested();
-            if (adb.HasExited) throw new InvalidOperationException("The Android USB service could not start.");
-            port = AndroidProcessJob.FindLoopbackPort(adb.Id);
-            if (port != 0 && IsAdbReady(port, token)) return;
-            if (token.WaitHandle.WaitOne(40)) token.ThrowIfCancellationRequested();
-        } while (Stopwatch.GetElapsedTime(start) < TimeSpan.FromSeconds(4));
-        throw new TimeoutException("The Android USB service did not open its local port.");
-    }
-
-    static bool IsAdbReady(int port, CancellationToken cancellation)
-    {
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        deadline.CancelAfter(TimeSpan.FromMilliseconds(500));
-        using var probe = new TcpClient(AddressFamily.InterNetwork);
-        try
-        {
-            probe.ConnectAsync(IPAddress.Loopback, port, deadline.Token).AsTask().GetAwaiter().GetResult();
-            using var stream = probe.GetStream();
-            stream.WriteAsync("000chost:version"u8.ToArray(), deadline.Token).AsTask().GetAwaiter().GetResult();
-            var status = new byte[4];
-            stream.ReadExactlyAsync(status, deadline.Token).AsTask().GetAwaiter().GetResult();
-            return status.AsSpan().SequenceEqual("OKAY"u8);
-        }
-        catch (SocketException) { return false; }
-        catch (IOException) { return false; }
-        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested) { return false; }
+        bridge = new AndroidPreviewBridge(job, folder);
     }
 
     public Packet? Read()
     {
+        if (!detectUsb)
+        {
+            cancellation.WaitHandle.WaitOne();
+            return null;
+        }
         if (capture == null) StartPreview();
         return capture!.Read();
     }
 
     void StartPreview()
     {
-        using (var waiting = job!.Start(HelperProcess("adb.exe", "-d", "wait-for-device")))
+        using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation))
         {
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
             deadline.CancelAfter(TimeSpan.FromSeconds(75));
-            try { waiting.WaitForExitAsync(deadline.Token).GetAwaiter().GetResult(); }
+            try { bridge!.Attach(AndroidAdbConnection.Connect(deadline.Token)); }
             catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
             {
-                throw new TimeoutException("Connect one Android phone over USB, unlock it, enable USB debugging and approve the phone prompt. Close other ADB tools if they have the USB device open.");
+                throw new TimeoutException("Connect one Android phone with a USB data cable, unlock it, and approve USB debugging. Check the Windows ADB (WinUSB) driver and close other ADB tools if they have the device open.");
             }
-            if (waiting.ExitCode != 0)
-                throw new InvalidOperationException("ADB could not select one USB phone. Disconnect other phones and try again.");
         }
 
         cancellation.ThrowIfCancellationRequested();
-        if (adb!.HasExited) throw new InvalidOperationException("The Android USB service stopped.");
         string title = "Xeno Android preview " + Guid.NewGuid().ToString("N")[..8];
         lock (playbackGate) scrcpy = job!.Start(CreatePreviewProcess(title));
         long start = Stopwatch.GetTimestamp();
@@ -151,9 +128,15 @@ internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playA
         };
         // Windows Graphics Capture needs a rendered window. Keep the helper beyond the desktop.
         var preview = HelperProcess("scrcpy.exe", "--select-usb", "--no-control",
-            "--no-clipboard-autosync", "--window-borderless", "--window-x=30000", "--window-y=30000",
+            "--no-clipboard-autosync", "--force-adb-forward", "--window-borderless", "--window-x=30000", "--window-y=30000",
             "--max-size=" + size, "--max-fps=" + fps, "--video-bit-rate=" + bitrate,
             "--video-buffer=0", "--window-title=" + title);
+        if (bridge != null)
+        {
+            preview.ArgumentList.Add("--port=" + bridge.Port.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            preview.Environment[AndroidPreviewBridge.PipeVariable] = bridge.PipeName;
+            preview.Environment[AndroidPreviewBridge.ParentVariable] = Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
         if (playAudio)
         {
             preview.ArgumentList.Add("--audio-source=output");
@@ -169,25 +152,26 @@ internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playA
         var info = new ProcessStartInfo(Path.Combine(folder, executable))
         {
             WorkingDirectory = folder,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true
+            UseShellExecute = false
         };
         foreach (string argument in arguments) info.ArgumentList.Add(argument);
         foreach (string name in new[]
         {
             "ADB_SERVER_SOCKET", "ANDROID_ADB_SERVER_ADDRESS", "ANDROID_ADB_SERVER_PORT", "ADB_SERVER_PORT",
-            "ADB_VENDOR_KEYS", "ADB_TRACE", "ANDROID_SERIAL", "SCRCPY_SERVER_PATH", "SCRCPY_ICON_PATH",
+            "ADB_VENDOR_KEYS", "ADB_TRACE", "ANDROID_SERIAL", "SCRCPY_SERVER_PATH", "SCRCPY_ICON_PATH", AndroidPreviewBridge.PipeVariable, AndroidPreviewBridge.ParentVariable,
             "SDL3_DYNAMIC_API", "SDL_OPENGL_LIBRARY", "SDL_EGL_LIBRARY", "SDL_VULKAN_LIBRARY"
         }) info.Environment.Remove(name);
 
-        // Limit selection to cable-connected devices, even when wireless debugging exists on the PC.
-        info.Environment["ADB_USB"] = detectUsb ? "1" : "0";
-        info.Environment["ADB_MDNS_AUTO_CONNECT"] = "0";
-        info.Environment["ADB_LOCAL_TRANSPORT_MAX_PORT"] = "0";
-        if (port != 0) info.Environment["ADB_SERVER_SOCKET"] = $"tcp:127.0.0.1:{port}";
-        info.Environment["ADB"] = Path.Combine(folder, "adb.exe");
+        foreach (string name in info.Environment.Keys.ToArray())
+        {
+            if (name.StartsWith("DOTNET_", StringComparison.OrdinalIgnoreCase) ||
+                name.StartsWith("CORECLR_", StringComparison.OrdinalIgnoreCase) ||
+                name.StartsWith("COMPLUS_", StringComparison.OrdinalIgnoreCase) ||
+                name.StartsWith("COR_", StringComparison.OrdinalIgnoreCase)) info.Environment.Remove(name);
+        }
+
+        info.Environment["PATH"] = Environment.SystemDirectory;
+        info.Environment["ADB"] = Path.Combine(AppContext.BaseDirectory, "XenoCapture.exe");
         info.Environment["SCRCPY_SERVER_PATH"] = Path.Combine(folder, "scrcpy-server");
         info.Environment["SCRCPY_ICON_PATH"] = Path.Combine(folder, "scrcpy.png");
         return info;
@@ -195,30 +179,45 @@ internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playA
 
     sealed class VerifiedPackage : IDisposable
     {
-        // Deny writes and replacement while the helper may still load a file.
         readonly List<FileStream> files = new(HelperFiles.Length);
+        internal string Folder { get; }
 
         internal VerifiedPackage(string path, CancellationToken token)
         {
             if (!Directory.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
                 throw new InvalidOperationException("Install the verified Android USB helper beside XenoCapture.exe.");
-            if (Directory.EnumerateFileSystemEntries(path).Take(HelperFiles.Length + 1).Count() != HelperFiles.Length)
+            // Permit old installations in place; these legacy ADB files are never copied or run.
+            string[] legacyFiles = ["adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll"];
+            if (Directory.EnumerateFileSystemEntries(path).Select(Path.GetFileName).Any(name =>
+                !legacyFiles.Contains(name, StringComparer.OrdinalIgnoreCase) &&
+                !HelperFiles.Any(file => string.Equals(file.Name, name, StringComparison.OrdinalIgnoreCase))))
                 throw new InvalidOperationException("The Android USB helper folder does not match the verified package.");
 
+            Folder = CreatePrivateDirectory();
             try
             {
                 foreach (var (name, hash) in HelperFiles)
                 {
                     token.ThrowIfCancellationRequested();
-                    string file = Path.Combine(path, name);
-                    if (!File.Exists(file) || (File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0)
+                    string source = Path.Combine(path, name);
+                    if (!File.Exists(source) || (File.GetAttributes(source) & FileAttributes.ReparsePoint) != 0)
                         throw new InvalidOperationException("The Android USB helper folder is incomplete.");
 
-                    var data = File.OpenRead(file);
+                    string destination = Path.Combine(Folder, name);
+                    using (var input = File.OpenRead(source))
+                    {
+                        if (input.Length is < 1 or > 16 * 1024 * 1024)
+                            throw new InvalidOperationException("An Android USB helper file has an unexpected size.");
+                        using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                        input.CopyTo(output);
+                    }
+                    // Verify the exact copy the loader will use and deny changes while it runs.
+                    var data = File.OpenRead(destination);
                     files.Add(data);
-                    if (data.Length is < 1 or > 16 * 1024 * 1024 || Convert.ToHexString(SHA256.HashData(data)) != hash)
+                    if (Convert.ToHexString(SHA256.HashData(data)) != hash)
                         throw new InvalidOperationException("An Android USB helper file failed verification.");
                 }
+                new DirectoryInfo(Folder).SetAccessControl(DirectoryAccess(writable: false));
             }
             catch
             {
@@ -227,10 +226,49 @@ internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playA
             }
         }
 
+        static string CreatePrivateDirectory()
+        {
+            string root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (!Directory.Exists(root))
+                throw new InvalidOperationException("The Android USB helper needs a local user data directory.");
+            string folder = Path.Combine(root, "XenoCapture.Android." + Guid.NewGuid().ToString("N"));
+            DirectoryAccess(writable: true, setOwner: true).CreateDirectory(folder);
+            return folder;
+        }
+
+        static DirectorySecurity DirectoryAccess(bool writable, bool setOwner = false)
+        {
+            using var identity = WindowsIdentity.GetCurrent();
+            var owner = identity.User ?? throw new InvalidOperationException("Could not identify the current Windows user.");
+            var security = new DirectorySecurity();
+            if (setOwner) security.SetOwner(owner);
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            const InheritanceFlags inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
+            security.AddAccessRule(new FileSystemAccessRule(owner,
+                writable ? FileSystemRights.FullControl : FileSystemRights.ReadAndExecute,
+                inheritance, PropagationFlags.None, AccessControlType.Allow));
+            security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
+            return security;
+        }
+
         public void Dispose()
         {
             foreach (var file in files) file.Dispose();
             files.Clear();
+            if (!Directory.Exists(Folder) || (File.GetAttributes(Folder) & FileAttributes.ReparsePoint) != 0) return;
+            try { new DirectoryInfo(Folder).SetAccessControl(DirectoryAccess(writable: true)); }
+            catch (IOException) { return; }
+            catch (UnauthorizedAccessException) { return; }
+            foreach (var (name, _) in HelperFiles)
+            {
+                try { File.Delete(Path.Combine(Folder, name)); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+            try { Directory.Delete(Folder); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
     }
 
@@ -261,14 +299,18 @@ internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playA
                 try
                 {
                     job?.Dispose();
-                    if (adb?.WaitForExit(900) == false)
-                        throw new InvalidOperationException("The Android USB service did not exit.");
+                    scrcpy?.WaitForExit(900);
+
                 }
                 finally
                 {
                     scrcpy?.Dispose();
-                    adb?.Dispose();
-                    package?.Dispose();
+                    try { bridge?.Dispose(); }
+                    finally
+                    {
+                        previewClient?.Dispose();
+                        package?.Dispose();
+                    }
                 }
             }
         }
@@ -304,8 +346,6 @@ internal sealed class AndroidProcessJob : IDisposable
     [DllImport("kernel32.dll", SetLastError = true), DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     static extern bool SetInformationJobObject(SafeFileHandle job, int informationClass, ref Limits limits, int length);
 
-    [DllImport("kernel32.dll", SetLastError = true), DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-    static extern bool AssignProcessToJobObject(SafeFileHandle job, SafeProcessHandle process);
 
     [DllImport("iphlpapi.dll"), DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     static extern uint GetExtendedTcpTable(nint table, ref int size, bool order, int family, int tableClass, uint reserved);
@@ -322,48 +362,50 @@ internal sealed class AndroidProcessJob : IDisposable
         }
     }
 
-    internal Process Start(ProcessStartInfo info)
+    internal Process Start(ProcessStartInfo info) => AndroidHelperLaunch.Start(info, handle);
+
+    [DllImport("kernel32.dll"), DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    static extern SafeProcessHandle OpenProcess(uint access, bool inherit, uint pid);
+
+    [DllImport("kernel32.dll"), DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    static extern bool IsProcessInJob(SafeProcessHandle process, SafeFileHandle job, out bool result);
+
+    internal bool Contains(uint pid)
     {
-        var process = Process.Start(info) ?? throw new InvalidOperationException("Could not start an Android USB helper.");
-        try
-        {
-            if (!AssignProcessToJobObject(handle, process.SafeHandle))
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not attach the Android USB helper to its session.");
-            // Helper output may contain phone identifiers. Drain it without retaining it.
-            process.OutputDataReceived += (_, _) => { };
-            process.ErrorDataReceived += (_, _) => { };
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-            return process;
-        }
-        catch
-        {
-            try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
-            finally { process.Dispose(); }
-            throw;
-        }
+        using var process = OpenProcess(0x1000, false, pid);
+        return !process.IsInvalid && !handle.IsClosed &&
+            IsProcessInJob(process, handle, out bool result) && result;
     }
 
-    internal static int FindLoopbackPort(int processId)
+    internal bool OwnsPeer(Socket socket)
     {
-        const int rowSize = 24;
+        if (socket.LocalEndPoint is not IPEndPoint local || socket.RemoteEndPoint is not IPEndPoint peer ||
+            !local.Address.Equals(IPAddress.Loopback) || !peer.Address.Equals(IPAddress.Loopback)) return false;
+
+        const int ipv4 = 2, ownerConnections = 4, rowSize = 24, established = 5, loopback = 0x0100007f;
+        int peerPort = (ushort)IPAddress.HostToNetworkOrder((short)peer.Port);
+        int localPort = (ushort)IPAddress.HostToNetworkOrder((short)local.Port);
         int size = 0;
-        GetExtendedTcpTable(0, ref size, false, 2, 3, 0);
-        if (size < 4 || size > 16 * 1024 * 1024) return 0;
+        GetExtendedTcpTable(0, ref size, false, ipv4, ownerConnections, 0);
+        if (size < 4 || size > 16 * 1024 * 1024) return false;
         int allocated = size;
         nint table = Marshal.AllocHGlobal(size);
         try
         {
-            if (GetExtendedTcpTable(table, ref size, false, 2, 3, 0) != 0) return 0;
+            if (GetExtendedTcpTable(table, ref size, false, ipv4, ownerConnections, 0) != 0) return false;
             int count = Marshal.ReadInt32(table);
-            if (count < 0 || count > (allocated - 4) / rowSize) return 0;
+            if (count < 0 || count > (allocated - 4) / rowSize) return false;
             for (int index = 0; index < count; index++)
             {
                 nint row = table + 4 + index * rowSize;
-                if (Marshal.ReadInt32(row, 20) == processId && Marshal.ReadInt32(row, 4) == 0x0100007f)
-                    return (ushort)System.Net.IPAddress.NetworkToHostOrder((short)Marshal.ReadInt32(row, 8));
+                // Look up the client side of this exact connection in the kernel.
+                if (Marshal.ReadInt32(row) == established &&
+                    Marshal.ReadInt32(row, 4) == loopback && Marshal.ReadInt32(row, 12) == loopback &&
+                    (Marshal.ReadInt32(row, 8) & 0xffff) == peerPort &&
+                    (Marshal.ReadInt32(row, 16) & 0xffff) == localPort)
+                    return Contains((uint)Marshal.ReadInt32(row, 20));
             }
-            return 0;
+            return false;
         }
         finally { Marshal.FreeHGlobal(table); }
     }

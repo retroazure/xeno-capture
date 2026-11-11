@@ -199,7 +199,7 @@ internal sealed class Direct3DHost : HwndHost
             FrameGenerationMode previousMode = FrameGenerationMode.Off;
             bool content30=false, previousContent30=false;
             HighRateCadence highRateCadence = default;
-            bool limitHighRate = false;
+            int limitedMultiplier = 0;
             (double Refresh, long Period, PreviewUpscaler Upscaler, AiVideoSettings Ai) highRateSettings = default;
             long cadenceEpoch=0,cadenceDue=0,cadenceInputAt=0,cadenceScheduledPeriod=0,consumedArrival=0;
             int cadencePhase=0,cadenceStep=0;
@@ -406,7 +406,7 @@ internal sealed class Direct3DHost : HwndHost
                     Status(gpu.FrameGenerationFailure ?? "Unavailable"); Requeue(packet); return false;
                 }
                 if (gpu.FrameWasDuplicate) Interlocked.Increment(ref skippedCaptureDuplicates);
-                Status($"{(content30 ? "30 FPS game · " : "")}{multiplier}× · {(limitHighRate ? "4× limited by presentation · " : "")}{10_000_000.0 / period:0}→{10_000_000.0 * multiplier / period:0} fps · {gpu.FrameGenerationDetail}");
+                Status($"{(content30 ? "30 FPS game · " : "")}{multiplier}× · {(limitedMultiplier != 0 ? "4× limited by presentation · " : "")}{10_000_000.0 / period:0}→{10_000_000.0 * multiplier / period:0} fps · {gpu.FrameGenerationDetail}");
                 Volatile.Write(ref frameGenerationActive, true); return true;
             }
             void SetCadence(long epoch)
@@ -518,7 +518,7 @@ internal sealed class Direct3DHost : HwndHost
                     if(gpu.HasInterpolationFrame || requested!=previousMode)gpu.ResetInterpolation();
                     timingFailure=null;previousMode=requested;previousContent30=content30;cadenceDue=0;cadenceStep=0;Volatile.Write(ref frameGenerationActive,false);
                     highRateCadence = default;
-                    limitHighRate = false;
+                    limitedMultiplier = 0;
                     predictionDue = 0; predictionShown = false;
                     sourcePacing = default;
                 }
@@ -551,17 +551,18 @@ internal sealed class Direct3DHost : HwndHost
                         if (settings != highRateSettings || !generating || multiplier != 4 || !HighRateCadence.Eligible(contentPeriod))
                         {
                             highRateCadence = default;
-                            if (limitHighRate) cadenceScheduledPeriod = 0;
-                            limitHighRate = false;
+                            if (limitedMultiplier != 0) cadenceScheduledPeriod = 0;
+                            limitedMultiplier = 0;
                             highRateSettings = settings;
                         }
-                        else if (!limitHighRate && highRateCadence.PreferThreePhases)
+                        else if (limitedMultiplier == 0 && highRateCadence.NeedsLowerMultiplier)
                         {
-                            limitHighRate = true;
+                            limitedMultiplier = FrameGenerationPolicy.HighRateFallbackMultiplier(
+                                contentPeriod, refreshHz, isFullscreen && SmoothSourcePacing);
                             cadenceScheduledPeriod = 0;
                         }
                     }
-                    if (generating && limitHighRate) multiplier = 3;
+                    if (generating && limitedMultiplier != 0) multiplier = limitedMultiplier;
                     if (!generating)
                     {
                         string reason = timingFailure ?? gpu.FrameGenerationFailure ?? ((long)candidateWidth * candidateHeight > 1920L * 1080 ? "1080p input limit"
@@ -773,7 +774,7 @@ internal sealed class Direct3DHost : HwndHost
                     {
                         gpu.ResetInterpolation(); cadenceDue=0; cadenceStep=0; Volatile.Write(ref frameGenerationActive,false);
                         highRateCadence = default;
-                        limitHighRate = false;
+                        limitedMultiplier = 0;
                         Status("Waiting for video"); signal.WaitOne(); continue;
                     }
                     if (cadenceScheduledPeriod != period) SetCadence(Clock.Now);

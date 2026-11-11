@@ -4,6 +4,7 @@ using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Windows;
 using System.Windows.Media;
@@ -27,7 +28,8 @@ internal static class FrameGenerationDiagnostics
         }
         if(Array.IndexOf(Environment.GetCommandLineArgs(),"--high-rate-only")>=0)
         {
-            var rate=await RunHighRateUi(folder);rate["result"]="PASS";
+            bool test1440p = Array.IndexOf(Environment.GetCommandLineArgs(), "--1440p-output") >= 0;
+            var rate=await RunHighRateUi(folder, test1440p);rate["result"]="PASS";
             await File.WriteAllTextAsync(Path.Combine(folder,"results.json"),JsonSerializer.Serialize(rate,new JsonSerializerOptions{WriteIndented=true}));return;
         }
         var results = await Task.Run(() => RunGpu(folder));
@@ -49,10 +51,15 @@ internal static class FrameGenerationDiagnostics
             stable.Observe(start + i * 41_667L, period);
         for (int i = 0; i < 100; i++)
             limited.Observe(start + i * 55_556L, period);
-        Require(!stable.PreferThreePhases && !limited.PreferThreePhases, "A sustainable rate or a short stall triggered a downgrade.");
+        Require(!stable.NeedsLowerMultiplier && !limited.NeedsLowerMultiplier, "A sustainable rate or a short stall triggered a downgrade.");
         for (int i = 100; i < 205; i++)
             limited.Observe(start + i * 55_556L, period);
-        Require(limited.PreferThreePhases && !HighRateCadence.Eligible(333_333), "Sustained missed high-refresh slots did not select the steadier cadence.");
+        Require(limited.NeedsLowerMultiplier && !HighRateCadence.Eligible(333_333), "Sustained missed high-refresh slots did not select the steadier cadence.");
+        Require(FrameGenerationPolicy.HighRateFallbackMultiplier(166_667, 240, true) == 2 &&
+                FrameGenerationPolicy.HighRateFallbackMultiplier(166_833, 239.76, true) == 2 &&
+                FrameGenerationPolicy.HighRateFallbackMultiplier(166_667, 360, true) == 3 &&
+                FrameGenerationPolicy.HighRateFallbackMultiplier(166_667, 240, false) == 3,
+            "The high-rate fallback did not preserve an even refresh cadence when possible.");
     }
 
     internal static Dictionary<string, object> RunGpu(string folder)
@@ -414,20 +421,35 @@ internal static class FrameGenerationDiagnostics
         finally { await main.DiagnosticClose().WaitAsync(TimeSpan.FromSeconds(5)); }
         return checks;
     }
-    internal static async Task<Dictionary<string,object>> RunHighRateUi(string folder)
+    internal static async Task<Dictionary<string,object>> RunHighRateUi(string folder, bool test1440p = false)
     {
-        var checks=new Dictionary<string,object>();var source=new FrameGenerationTestSource(60);
+        int width = test1440p ? 1920 : 640, height = test1440p ? 1080 : 360;
+        var checks = new Dictionary<string,object>();
+        var source = new FrameGenerationTestSource(60, width: width, height: height);
         var main=new MainWindow(false,false,(_,_)=>new CaptureStream(()=>source,TimeSpan.FromSeconds(2))){ShowActivated=false};main.Show();
         async Task Wait(Func<bool> condition){var t=Stopwatch.StartNew();while(!condition()){if(t.ElapsedMilliseconds>10000)throw new TimeoutException("High-rate check: "+main.DiagnosticPreview?.FrameGenerationStatus);await Task.Delay(10);}}
         try
         {
             main.DiagnosticApplySettingsJson(JsonSerializer.Serialize(new{Folder=folder,Resolution=0,Bitrate=1,Sharpness=.25,Upscaling=1,Interpolation=1}));
-            main.DiagnosticPrepareInput();await main.DiagnosticConnectFullscreen(fastestMonitor: true);
+            main.DiagnosticPrepareInput();
+            if (test1440p)
+            {
+                var display = System.Windows.Forms.Screen.AllScreens
+                    .Where(screen => screen.Bounds.Width == 2560 && screen.Bounds.Height == 1440)
+                    .OrderByDescending(screen => DisplayTiming.RefreshRateForDevice(screen.DeviceName))
+                    .FirstOrDefault() ?? throw new InvalidOperationException("No 2560×1440 display is connected.");
+                await main.DiagnosticConnect();
+                await Wait(() => main.DiagnosticHasFrame);
+                await main.DiagnosticFullscreenOnDisplay(display.Bounds);
+                checks["captureResolution"] = "1920×1080";
+                checks["displayResolution"] = "2560×1440";
+            }
+            else await main.DiagnosticConnectFullscreen(fastestMonitor: true);
             await Wait(()=>main.DiagnosticPreview?.FrameGenerationActive==true);await Task.Delay(350);
             var host=main.DiagnosticPreview!;double refresh=DisplayTiming.RefreshRate(host.Handle);checks["highRateScreenRefreshHz"]=refresh;
             for(int multiplier=2;multiplier<=4;multiplier++)
             {
-                if(!FrameGenerationPolicy.CanGenerate(166667,refresh,640,360,multiplier)){checks[$"highRate60x{multiplier}"]="not exercised: display refresh below target";continue;}
+                if(!FrameGenerationPolicy.CanGenerate(166667,refresh,width,height,multiplier)){checks[$"highRate60x{multiplier}"]="not exercised: display refresh below target";continue;}
                 main.DiagnosticSelectFrameGeneration((FrameGenerationMode)(multiplier-1));await Wait(()=>host.FrameGenerationActive);await Task.Delay(multiplier == 4 ? 1600 : 700);
                 long shown=0,generated=0,input=source.Frames;var submissions=new List<double>();var presentationTimes=new List<long>();
                 void Count(PresentedFrame f){Interlocked.Increment(ref shown);if(f.Kind==PresentationKind.Interpolated)Interlocked.Increment(ref generated);lock(submissions){submissions.Add(host.LastSubmissionMs);presentationTimes.Add(Clock.Now);}}
@@ -438,7 +460,8 @@ internal static class FrameGenerationDiagnostics
                 int effective = host.EffectiveFrameGenerationMultiplier;
                 checks[$"highRate60x{multiplier}"]=new{effectiveMultiplier=effective,presentationGapP95Ms=gaps.Length==0?0:gaps[(int)((gaps.Length-1)*.95)],presentationGapP99Ms=gaps.Length==0?0:gaps[(int)((gaps.Length-1)*.99)],drawSubmissionP95Ms=costs.Length==0?0:costs[(int)((costs.Length-1)*.95)],captureFps=(source.Frames-input)/seconds,outputFps=output,generatedFps=synthetic,status=host.FrameGenerationStatus};
                 File.WriteAllText(Path.Combine(folder,"high-rate-stage.json"),JsonSerializer.Serialize(checks,new JsonSerializerOptions{WriteIndented=true}));
-                Require(effective == multiplier || (multiplier == 4 && effective == 3 && host.FrameGenerationStatus.Contains("4× limited by presentation", StringComparison.Ordinal)),
+                int expectedFallback = FrameGenerationPolicy.HighRateFallbackMultiplier(166_667, refresh, host.SmoothSourcePacing);
+                Require(effective == multiplier || (multiplier == 4 && effective == expectedFallback && host.FrameGenerationStatus.Contains("4× limited by presentation", StringComparison.Ordinal)),
                     "The high-refresh pacing fallback did not report the active multiplier.");
                 Require(output>60*effective*.85,"60 FPS input did not reach the active high-rate target: "+output);
                 Require(synthetic>60*(effective-1)*.55,"High-rate output mainly repeated captured frames: "+synthetic);

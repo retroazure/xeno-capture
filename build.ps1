@@ -72,7 +72,10 @@ try {
             $_.FullName -match '^scrcpy-win64-v5\.0\.1/[^/\\]+$' -and $_.Name -notmatch '\.(bat|vbs)$'
         })
         if ($entries.Count -ne 14) { throw 'The Android helper ZIP layout differs from the expected package.' }
-        foreach ($entry in $entries) { Write-AndroidEntry $entry $helperDirectory.FullName }
+        $legacyAdb = @('adb.exe', 'AdbWinApi.dll', 'AdbWinUsbApi.dll')
+        foreach ($entry in $entries) {
+            if ($entry.Name -notin $legacyAdb) { Write-AndroidEntry $entry $helperDirectory.FullName }
+        }
     }
 } finally {
     if ($archive) { $archive.Dispose() }

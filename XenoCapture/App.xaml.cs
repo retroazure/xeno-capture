@@ -24,6 +24,13 @@ public partial class App : Application
 
     protected override async void OnStartup(StartupEventArgs e)
     {
+        if (Environment.GetEnvironmentVariable(AndroidPreviewBridge.PipeVariable) is { } pipe)
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            Shutdown(await AndroidPreviewBridge.RunClientAsync(pipe, e.Args));
+            return;
+        }
+
         base.OnStartup(e);
         foreach (string mode in DiagnosticModes)
         {

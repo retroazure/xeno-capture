@@ -129,6 +129,20 @@ internal static class FrameGenerationPolicy
     }
 
 
+    internal static int HighRateFallbackMultiplier(long period, double refreshHz, bool synchronizedFullscreen)
+    {
+        if (!synchronizedFullscreen) return 3;
+        double refreshesPerCapture = period * refreshHz / 10_000_000;
+        bool Even(int multiplier)
+        {
+            double refreshes = refreshesPerCapture / multiplier;
+            return refreshes >= .98 && Math.Abs(refreshes - Math.Round(refreshes)) < .02;
+        }
+
+        // For example, 120 FPS fills two refreshes per frame on a fixed 240 Hz display.
+        return Even(2) && !Even(3) ? 2 : 3;
+    }
+
     internal static long GameCadenceCorrection(long desired, long due, long period)
     {
         long error = desired - due;
@@ -152,13 +166,13 @@ internal struct HighRateCadence
     const long ObservationWindow = 5_000_000;
     long startedAt;
     int accepted, consecutiveShortWindows;
-    internal bool PreferThreePhases => consecutiveShortWindows >= 2;
+    internal bool NeedsLowerMultiplier => consecutiveShortWindows >= 2;
 
     internal static bool Eligible(long period) => period is >= 80_000 and <= 190_000;
 
     internal void Observe(long now, long period)
     {
-        if (PreferThreePhases) return;
+        if (NeedsLowerMultiplier) return;
         if (startedAt == 0) { startedAt = now; return; }
         accepted++;
         long elapsed = now - startedAt;
