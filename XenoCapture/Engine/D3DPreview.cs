@@ -122,15 +122,29 @@ internal sealed unsafe partial class D3DPreview : IDisposable
         ResetInterpolation();
         // Drop the old flip buffers before another owner attaches a window.
         ReleaseTarget();
-        ((delegate* unmanaged[Stdcall]<nint, void>)context.Slot(111))(context.P);
+        SubmitPendingDraw();
     }
+    void ReleaseRenderTarget()
+    {
+        if (context != null) UnbindRenderTarget();
+        renderView?.Dispose();
+        target?.Dispose();
+        renderView = null;
+        target = null;
+    }
+
     void ReleaseTarget()
     {
-        if (context != null)
-            ((delegate* unmanaged[Stdcall]<nint, uint, nint*, nint, void>)context.Slot(33))(context.P, 0, null, 0);
-        renderView?.Dispose(); target?.Dispose(); renderView = target = null;
-        swap2?.Dispose(); swap?.Dispose(); swap2 = swap = null;
-        if (frameReady != 0) { CloseHandle(frameReady); frameReady = 0; }
+        ReleaseRenderTarget();
+        swap2?.Dispose();
+        swap?.Dispose();
+        swap2 = null;
+        swap = null;
+        if (frameReady != 0)
+        {
+            CloseHandle(frameReady);
+            frameReady = 0;
+        }
         frameSlotReady = false;
     }
     void CreateTarget()
@@ -147,9 +161,9 @@ internal sealed unsafe partial class D3DPreview : IDisposable
     public void Resize(int w, int h)
     {
         if (w < 1 || h < 1 || (w == width && h == height)) return;
-        ((delegate* unmanaged[Stdcall]<nint, uint, nint*, nint, void>)context.Slot(33))(context.P, 0, null, 0);
-        renderView?.Dispose(); target?.Dispose(); renderView = target = null;
-        width = w; height = h;
+        ReleaseRenderTarget();
+        width = w;
+        height = h;
         if (swap != null) Native.Hr(((delegate* unmanaged[Stdcall]<nint, uint, uint, uint, uint, uint, int>)swap.Slot(13))(swap.P, 0, (uint)w, (uint)h, 0, 0x40));
         CreateTarget();
     }
@@ -190,42 +204,69 @@ internal sealed unsafe partial class D3DPreview : IDisposable
     }
     void Upload(Com texture, byte* source, int pitch, int rows)
     {
-        Mapped map; Native.Hr(((delegate* unmanaged[Stdcall]<nint, nint, uint, uint, uint, Mapped*, int>)context.Slot(14))(context.P, texture.P, 0, 4, 0, &map));
+        Mapped map;
+        Native.Hr(((delegate* unmanaged[Stdcall]<nint, nint, uint, uint, uint, Mapped*, int>)context.Slot(MapSubresourceSlot))(context.P, texture.P, 0, (uint)ResourceMap.WriteDiscard, 0, &map));
         try
         {
-            if (map.Pitch == pitch) Buffer.MemoryCopy(source, (void*)map.Data, (long)pitch * rows, (long)pitch * rows);
-            else for (int y = 0; y < rows; y++) Buffer.MemoryCopy(source + y * pitch, (byte*)map.Data + y * map.Pitch, map.Pitch, pitch);
+            if (map.Pitch == pitch)
+            {
+                long bytes = (long)pitch * rows;
+                Buffer.MemoryCopy(source, (void*)map.Data, bytes, bytes);
+            }
+            else
+            {
+                for (int y = 0; y < rows; y++)
+                    Buffer.MemoryCopy(source + y * pitch, (byte*)map.Data + y * map.Pitch, map.Pitch, pitch);
+            }
         }
-        finally { ((delegate* unmanaged[Stdcall]<nint, nint, uint, void>)context.Slot(15))(context.P, texture.P, 0); }
+        finally { ((delegate* unmanaged[Stdcall]<nint, nint, uint, void>)context.Slot(UnmapSubresourceSlot))(context.P, texture.P, 0); }
     }
     void SetGraphicsParameters(ShaderParameters parameters)
     {
         if (!parametersValid || parameters != previousParameters)
         {
-            Mapped cb; Native.Hr(((delegate* unmanaged[Stdcall]<nint, nint, uint, uint, uint, Mapped*, int>)context.Slot(14))(context.P, constants!.P, 0, 4, 0, &cb));
+            Mapped cb;
+            Native.Hr(((delegate* unmanaged[Stdcall]<nint, nint, uint, uint, uint, Mapped*, int>)context.Slot(MapSubresourceSlot))(context.P, constants!.P, 0, (uint)ResourceMap.WriteDiscard, 0, &cb));
             try { *(ShaderParameters*)cb.Data = parameters; }
-            finally { ((delegate* unmanaged[Stdcall]<nint, nint, uint, void>)context.Slot(15))(context.P, constants.P, 0); }
-            previousParameters = parameters; parametersValid = true; ConstantUploads++;
+            finally { ((delegate* unmanaged[Stdcall]<nint, nint, uint, void>)context.Slot(UnmapSubresourceSlot))(context.P, constants.P, 0); }
+            previousParameters = parameters;
+            parametersValid = true;
+            ConstantUploads++;
         }
     }
-    readonly record struct ImageSource(Com Color, Com? Chroma, int Width, int Height, PixelLayout Layout = PixelLayout.Bgr32, bool FullRange = false, bool Bt601 = false,long ContentRevision=0, Com? RtxInput = null);
+    readonly record struct ImageSource(Com Color, Com? Chroma, int Width, int Height, PixelLayout Layout = PixelLayout.Bgr32,
+        bool FullRange = false, bool Bt601 = false, long ContentRevision = 0, Com? RtxInput = null);
     ImageSource UploadFrame(Packet frame)
     {
         if (frame.Width != inputWidth || frame.Height != inputHeight || frame.Layout != layout || image == null)
         {
-            nint* empty = stackalloc nint[2]; empty[0] = empty[1] = 0;
-            ((delegate* unmanaged[Stdcall]<nint, uint, uint, nint*, void>)context.Slot(8))(context.P, 0, 2, empty);
-            imageView?.Dispose(); image?.Dispose(); chromaView?.Dispose(); chroma?.Dispose(); chroma = chromaView = null;
-            inputWidth = frame.Width; inputHeight = frame.Height; layout = frame.Layout;
-            image = Texture(inputWidth, inputHeight, layout == PixelLayout.Nv12 ? 61u : 87u, 2, 8, 0x10000); imageView = View(image);
-            if (layout == PixelLayout.Nv12) { chroma = Texture(inputWidth / 2, inputHeight / 2, 49, 2, 8, 0x10000); chromaView = View(chroma); }
+            ClearPixelInputs();
+            imageView?.Dispose();
+            image?.Dispose();
+            chromaView?.Dispose();
+            chroma?.Dispose();
+            chroma = null;
+            chromaView = null;
+            inputWidth = frame.Width;
+            inputHeight = frame.Height;
+            layout = frame.Layout;
+
+            // NV12 uploads luma and interleaved chroma to separate views.
+            image = Texture(inputWidth, inputHeight, layout == PixelLayout.Nv12 ? 61u : 87u, 2, 8, 0x10000);
+            imageView = View(image);
+            if (layout == PixelLayout.Nv12)
+            {
+                chroma = Texture(inputWidth / 2, inputHeight / 2, 49, 2, 8, 0x10000);
+                chromaView = View(chroma);
+            }
         }
         fixed (byte* data = frame.Bytes)
         {
             Upload(image, data, inputWidth * (layout == PixelLayout.Nv12 ? 1 : 4), inputHeight);
             if (chroma != null) Upload(chroma, data + inputWidth * inputHeight, inputWidth, inputHeight / 2);
         }
-        imageUploadRevision++;return new(imageView!, chromaView, inputWidth, inputHeight, layout, frame.FullRange, frame.Bt601,++sourceContentRevision);
+        imageUploadRevision++;
+        return new(imageView!, chromaView, inputWidth, inputHeight, layout, frame.FullRange, frame.Bt601, ++sourceContentRevision);
     }
     public void Draw(Packet frame, double sharpness, PreviewUpscaler upscaler = PreviewUpscaler.Standard)
     {
@@ -255,61 +296,90 @@ internal sealed unsafe partial class D3DPreview : IDisposable
     {
         fullscreenMotionOutput = null;
         var viewport = FittedViewport(source.Width, source.Height);
-        Com display = source.Color; Com? displayChroma = source.Chroma;
+        Com display = source.Color;
+        Com? displayChroma = source.Chroma;
         var ai = AiVideoSettings.Validate(AiVideo);
         bool usePreviewFilters = upscaler != PreviewUpscaler.Performance || ai.Enabled;
         var parameters = new ShaderParameters(source.Width, source.Height, usePreviewFilters ? (float)sharpness : 0,
             source.Layout == PixelLayout.Nv12 ? 1 : 0, source.FullRange ? 1 : 0, source.Bt601 ? 1 : 0);
-        UsedEnhancedUpscaling = false; RtxVideoRequested = false;AiVideoActive=false;AiVideoFallbackReason=null;
-        if(!ai.Enabled)AiVideoStatus="Off";
+        UsedEnhancedUpscaling = false;
+        RtxVideoRequested = false;
+        AiVideoActive = false;
+        AiVideoFallbackReason = null;
+        if (!ai.Enabled) AiVideoStatus = "Off";
         if (upscaler != previousUpscaler)
         {
-            if(!ai.Enabled && upscaler != PreviewUpscaler.RtxVideo) ResetRtxVideo(); nisDisabled = false; UpscalingFallbackReason = null; previousUpscaler = upscaler;
+            if (!ai.Enabled && upscaler != PreviewUpscaler.RtxVideo) ResetRtxVideo();
+            nisDisabled = false;
+            UpscalingFallbackReason = null;
+            previousUpscaler = upscaler;
         }
         bool enlarge = viewport.Width > source.Width + .5f && viewport.Height > source.Height + .5f;
         bool rtxRendered = false;
-        if(ai.Enabled)
+        if (ai.Enabled)
         {
-            var filtered=TryAiVideo(source,viewport.Width,viewport.Height);
-            if(filtered!=null)
+            var filtered = TryAiVideo(source, viewport.Width, viewport.Height);
+            if (filtered != null)
             {
-                display=filtered;displayChroma=null;parameters=new(AiVideoOutputWidth,AiVideoOutputHeight,(float)sharpness,0,0,0);rtxRendered=true;
-                UpscalingFallbackReason=null;if(nisShader!=null)DisposeNis();
+                display = filtered;
+                displayChroma = null;
+                parameters = new(AiVideoOutputWidth, AiVideoOutputHeight, (float)sharpness, 0, 0, 0);
+                rtxRendered = true;
+                UpscalingFallbackReason = null;
+                if (nisShader != null) DisposeNis();
             }
-            else UpscalingFallbackReason=AiVideoFallbackReason;
+            else UpscalingFallbackReason = AiVideoFallbackReason;
         }
         else if (upscaler == PreviewUpscaler.RtxVideo && enlarge)
         {
-            int outputWidth = Math.Clamp((int)Math.Round(viewport.Width),source.Width,width), outputHeight = Math.Clamp((int)Math.Round(viewport.Height),source.Height,height);
-            var rtxDisplay = TryUpscaleRtxVideo(source,outputWidth,outputHeight,cacheOutput:true);
+            int outputWidth = Math.Clamp((int)Math.Round(viewport.Width), source.Width, width);
+            int outputHeight = Math.Clamp((int)Math.Round(viewport.Height), source.Height, height);
+            var rtxDisplay = TryUpscaleRtxVideo(source, outputWidth, outputHeight, cacheOutput: true);
             if (rtxDisplay != null)
             {
-                display = rtxDisplay; displayChroma = null; parameters = new(outputWidth,outputHeight,(float)sharpness,0,0,0); rtxRendered = true;
-                UpscalingFallbackReason = null; if (nisShader != null) DisposeNis();
+                display = rtxDisplay;
+                displayChroma = null;
+                parameters = new(outputWidth, outputHeight, (float)sharpness, 0, 0, 0);
+                rtxRendered = true;
+                UpscalingFallbackReason = null;
+                if (nisShader != null) DisposeNis();
             }
             else if (!nisDisabled) UpscalingFallbackReason = RtxVideoFallbackReason;
         }
-        else if (!ai.Enabled && !enlarge && upscaler == PreviewUpscaler.RtxVideo) { ResetRtxVideo(); UpscalingFallbackReason = null; }
+        else if (!enlarge && upscaler == PreviewUpscaler.RtxVideo)
+        {
+            ResetRtxVideo();
+            UpscalingFallbackReason = null;
+        }
         if (!rtxRendered)
         {
             bool basicScaling = upscaler is PreviewUpscaler.Standard or PreviewUpscaler.Performance;
             if (basicScaling || !enlarge)
             {
                 if (nisShader != null) DisposeNis();
-                if (basicScaling) { nisDisabled = false; if(!ai.Enabled)UpscalingFallbackReason = null; }
+                if (basicScaling)
+                {
+                    nisDisabled = false;
+                    if (!ai.Enabled) UpscalingFallbackReason = null;
+                }
             }
             else if (!nisDisabled)
             {
                 int outputWidth = Math.Clamp((int)Math.Round(viewport.Width), source.Width, width), outputHeight = Math.Clamp((int)Math.Round(viewport.Height), source.Height, height);
                 try
                 {
-                    display = UpscaleNis(source, outputWidth, outputHeight, sharpness); displayChroma = null;
-                    parameters = new(outputWidth, outputHeight, 0, 0, 0, 0); UsedEnhancedUpscaling = true;
+                    display = UpscaleNis(source, outputWidth, outputHeight, sharpness);
+                    displayChroma = null;
+                    parameters = new(outputWidth, outputHeight, 0, 0, 0, 0);
+                    UsedEnhancedUpscaling = true;
                 }
                 catch (Exception error) when (CanFallbackFromUpscaling(error))
                 {
-                    DisposeNis(); nisDisabled = true;
-                    UpscalingFallbackReason = (upscaler == PreviewUpscaler.RtxVideo ? "RTX Video and Normal upscaling unavailable; " : "Normal upscaling unavailable; ") + "Standard preview is active. " + error.Message;
+                    DisposeNis();
+                    nisDisabled = true;
+                    string unavailable = upscaler == PreviewUpscaler.RtxVideo
+                        ? "RTX Video and Normal upscaling unavailable; " : "Normal upscaling unavailable; ";
+                    UpscalingFallbackReason = unavailable + "Standard preview is active. " + error.Message;
                 }
             }
         }
@@ -334,9 +404,12 @@ internal sealed unsafe partial class D3DPreview : IDisposable
             // Use capture-pixel spacing even after a scaler has enlarged its stair steps.
             parameters = parameters with { EdgeStepX = .8f / output.SourceWidth, EdgeStepY = .8f / output.SourceHeight };
         }
-        nint* views = stackalloc nint[2]; views[0] = output.Color.P; views[1] = output.Chroma?.P ?? 0;
-        ((delegate* unmanaged[Stdcall]<nint, uint, uint, nint*, void>)context.Slot(8))(context.P, 0, 2, views);
-        var rt = renderView!.P; ((delegate* unmanaged[Stdcall]<nint, uint, nint*, nint, void>)context.Slot(33))(context.P, 1, &rt, 0);
+        nint* views = stackalloc nint[2];
+        views[0] = output.Color.P;
+        views[1] = output.Chroma?.P ?? 0;
+        ((delegate* unmanaged[Stdcall]<nint, uint, uint, nint*, void>)context.Slot(SetPixelResourcesSlot))(context.P, 0, 2, views);
+        nint rt = renderView!.P;
+        ((delegate* unmanaged[Stdcall]<nint, uint, nint*, nint, void>)context.Slot(SetRenderTargetsSlot))(context.P, 1, &rt, 0);
         // Animate the final draw rectangle after the upscaler chooses its output size.
         bool transitioning = !docking && PresentationScale < 1;
         if (transitioning)
@@ -358,12 +431,15 @@ internal sealed unsafe partial class D3DPreview : IDisposable
         // Each flip-discard buffer must be cleared where the video leaves a border.
         if (docking || transitioning || (long)width * output.SourceHeight != (long)height * output.SourceWidth)
         {
-            float* black = stackalloc float[4]; black[0] = black[1] = black[2] = 0; black[3] = 1;
-            ((delegate* unmanaged[Stdcall]<nint, nint, float*, void>)context.Slot(50))(context.P, rt, black); TargetClears++;
+            float* black = stackalloc float[4];
+            black[0] = black[1] = black[2] = 0;
+            black[3] = 1;
+            ((delegate* unmanaged[Stdcall]<nint, nint, float*, void>)context.Slot(ClearRenderTargetViewSlot))(context.P, rt, black);
+            TargetClears++;
         }
 
-        ((delegate* unmanaged[Stdcall]<nint, uint, Viewport*, void>)context.Slot(44))(context.P, 1, &viewport);
-        ((delegate* unmanaged[Stdcall]<nint, uint, uint, void>)context.Slot(13))(context.P, 3, 0);
+        ((delegate* unmanaged[Stdcall]<nint, uint, Viewport*, void>)context.Slot(SetViewportsSlot))(context.P, 1, &viewport);
+        ((delegate* unmanaged[Stdcall]<nint, uint, uint, void>)context.Slot(DrawSlot))(context.P, 3, 0);
     }
     public bool Present(bool allowBlocking, uint syncInterval)
     {
@@ -383,7 +459,11 @@ internal sealed unsafe partial class D3DPreview : IDisposable
                 (swap.P, syncInterval, doNotWait, &parameters);
             if (status == stillDrawing) return false;
         }
-        if(status<0){int reason=((delegate* unmanaged[Stdcall]<nint,int>)device.Slot(39))(device.P);throw new COMException($"D3D11 presentation failed (device reason 0x{reason:X8}).",status);}
+        if (status < 0)
+        {
+            int reason = GetDeviceRemovalReason();
+            throw new COMException($"D3D11 presentation failed (device reason 0x{reason:X8}).", status);
+        }
         if (status != 0) return false; // A status such as occlusion did not enqueue a frame.
         frameSlotReady = false;
         return true;
@@ -405,24 +485,34 @@ internal sealed unsafe partial class D3DPreview : IDisposable
     public byte[] Readback()
     {
         using var staging = Texture(width, height, 87, 3, 0, 0x20000);
-        ((delegate* unmanaged[Stdcall]<nint, nint, nint, void>)context.Slot(47))(context.P, staging.P, target!.P);
-        Mapped map; Native.Hr(((delegate* unmanaged[Stdcall]<nint, nint, uint, uint, uint, Mapped*, int>)context.Slot(14))(context.P, staging.P, 0, 1, 0, &map));
+        CopyResource(staging, target!);
+        var map = MapResource(staging, ResourceMap.Read);
         var bytes = new byte[width * height * 4];
         try { for (int y = 0; y < height; y++) Marshal.Copy(map.Data + (int)(y * map.Pitch), bytes, y * width * 4, width * 4); }
-        finally { ((delegate* unmanaged[Stdcall]<nint, nint, uint, void>)context.Slot(15))(context.P, staging.P, 0); }
+        finally { UnmapResource(staging); }
         return bytes;
     }
     public void Dispose()
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
-        if (context != null) ((delegate* unmanaged[Stdcall]<nint, uint, nint*, nint, void>)context.Slot(33))(context.P, 0, null, 0);
+        if (context != null) UnbindRenderTarget();
         // Native VSR destruction already waits for queued GPU work.
         DisposeRtxVideo();
         ClearAiInputCache();
         DisposeInterpolation();
         DisposeNis();
-        chromaView?.Dispose(); chroma?.Dispose(); imageView?.Dispose(); image?.Dispose(); constants?.Dispose(); sampler?.Dispose(); aiPixelShader?.Dispose(); pixelShader?.Dispose(); vertexShader?.Dispose();
-        ReleaseTarget(); context?.Dispose(); device?.Dispose();
+        chromaView?.Dispose();
+        chroma?.Dispose();
+        imageView?.Dispose();
+        image?.Dispose();
+        constants?.Dispose();
+        sampler?.Dispose();
+        aiPixelShader?.Dispose();
+        pixelShader?.Dispose();
+        vertexShader?.Dispose();
+        ReleaseTarget();
+        context?.Dispose();
+        device?.Dispose();
     }
 
 }

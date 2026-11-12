@@ -78,12 +78,12 @@ internal sealed unsafe partial class D3DPreview
     }
     void FrameCompute(Com shader, Com? a, Com? b, Com? forward, Com? backward, Com? output0, Com? output1, Com? stats, int groupsX, int groupsY, float alpha = .5f, uint flags = 0)
     {
-        ClearPixelInputs(); ((delegate* unmanaged[Stdcall]<nint, uint, nint*, nint, void>)context.Slot(33))(context.P, 0, null, 0);
+        ClearPixelInputs(); UnbindRenderTarget();
         var parameters = new FlowParameters(frameWidth, frameHeight, analysisWidth, analysisHeight, flowWidth, flowHeight, alpha, flags);
-        Mapped mapped; Native.Hr(((delegate* unmanaged[Stdcall]<nint, nint, uint, uint, uint, Mapped*, int>)context.Slot(14))(context.P, frameConstants!.P, 0, 4, 0, &mapped));
+        var mapped = MapResource(frameConstants!, ResourceMap.WriteDiscard);
         try { *(FlowParameters*)mapped.Data = parameters; }
-        finally { ((delegate* unmanaged[Stdcall]<nint, nint, uint, void>)context.Slot(15))(context.P, frameConstants.P, 0); }
-        nint cb = frameConstants.P, linear = sampler!.P;
+        finally { UnmapResource(frameConstants!); }
+        nint cb = frameConstants!.P, linear = sampler!.P;
         nint* sources = stackalloc nint[4]; sources[0] = a?.P ?? 0; sources[1] = b?.P ?? 0; sources[2] = forward?.P ?? 0; sources[3] = backward?.P ?? 0;
         nint* targets = stackalloc nint[3]; targets[0] = output0?.P ?? 0; targets[1] = output1?.P ?? 0; targets[2] = stats?.P ?? 0;
         try
@@ -106,16 +106,16 @@ internal sealed unsafe partial class D3DPreview
     }
     void CopyFrameStatistics()
     {
-        ((delegate* unmanaged[Stdcall]<nint,nint,nint,void>)context.Slot(47))(context.P,frameStatsReadback!.P,frameStats!.P);
+        CopyResource(frameStatsReadback!, frameStats!);
     }
     bool TryMapFrameStatistics(uint flags, out FrameStatistics statistics)
     {
         Mapped read;
-        int result = ((delegate* unmanaged[Stdcall]<nint,nint,uint,uint,uint,Mapped*,int>)context.Slot(14))(context.P,frameStatsReadback!.P,0,1,flags,&read);
+        int result = MapResource(frameStatsReadback!, ResourceMap.Read, flags, &read);
         if (flags != 0 && result == unchecked((int)0x887A000A)) { statistics = default; return false; }
         Native.Hr(result);
         try { var data=(uint*)read.Data; statistics = new(data[0],data[1],data[2],data[3],data[4],data[5],data[6]); return true; }
-        finally { ((delegate* unmanaged[Stdcall]<nint,nint,uint,void>)context.Slot(15))(context.P,frameStatsReadback.P,0); }
+        finally { UnmapResource(frameStatsReadback!); }
     }
     FrameStatistics ReadFrameStatistics()
     {
@@ -271,7 +271,7 @@ internal sealed unsafe partial class D3DPreview
             ClearPixelInputs(); ClearComputeBindings(); nint empty = 0;
             ((delegate* unmanaged[Stdcall]<nint, uint, uint, nint*, void>)context.Slot(71))(context.P, 0, 1, &empty);
             ((delegate* unmanaged[Stdcall]<nint, uint, uint, nint*, void>)context.Slot(70))(context.P, 0, 1, &empty);
-            ((delegate* unmanaged[Stdcall]<nint, uint, nint*, nint, void>)context.Slot(33))(context.P, 0, null, 0);
+            UnbindRenderTarget();
         }
         frameLastDistinct?.Dispose(); frameLastDistinct = null;
         DisposeOpticalFlow(); // Unregister NVIDIA resources before releasing the input history.

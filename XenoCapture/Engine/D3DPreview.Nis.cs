@@ -105,15 +105,10 @@ internal sealed unsafe partial class D3DPreview
             DstNormX = 1f / outputWidth, DstNormY = 1f / outputHeight, SrcNormX = 1f / sourceWidth, SrcNormY = 1f / sourceHeight,
             InputWidth = (uint)sourceWidth, InputHeight = (uint)sourceHeight, OutputWidth = (uint)outputWidth, OutputHeight = (uint)outputHeight
         };
-        Mapped mapped; Native.Hr(((delegate* unmanaged[Stdcall]<nint, nint, uint, uint, uint, Mapped*, int>)context.Slot(14))(context.P, nisConstants!.P, 0, 4, 0, &mapped));
+        var mapped = MapResource(nisConstants!, ResourceMap.WriteDiscard);
         try { *(NisParameters*)mapped.Data = values; }
-        finally { ((delegate* unmanaged[Stdcall]<nint, nint, uint, void>)context.Slot(15))(context.P, nisConstants.P, 0); }
+        finally { UnmapResource(nisConstants!); }
         nisPreviousParameters = key;
-    }
-    void ClearPixelInputs()
-    {
-        nint* empty = stackalloc nint[2]; empty[0] = empty[1] = 0;
-        ((delegate* unmanaged[Stdcall]<nint, uint, uint, nint*, void>)context.Slot(8))(context.P, 0, 2, empty);
     }
     void ClearComputeBindings()
     {
@@ -127,14 +122,16 @@ internal sealed unsafe partial class D3DPreview
         ClearPixelInputs(); ClearComputeBindings();
         SetPreviewPixelShader(aiResampling: false);
         SetGraphicsParameters(new(source.Width, source.Height, 0, source.Layout == PixelLayout.Nv12 ? 1 : 0, source.FullRange ? 1 : 0, source.Bt601 ? 1 : 0));
-        nint* input = stackalloc nint[2]; input[0] = source.Color.P; input[1] = source.Chroma?.P ?? 0;
-        ((delegate* unmanaged[Stdcall]<nint, uint, uint, nint*, void>)context.Slot(8))(context.P, 0, 2, input);
-        nint rt = destination.Attachment.P;
-        ((delegate* unmanaged[Stdcall]<nint, uint, nint*, nint, void>)context.Slot(33))(context.P, 1, &rt, 0);
+        nint* input = stackalloc nint[2];
+        input[0] = source.Color.P;
+        input[1] = source.Chroma?.P ?? 0;
+        ((delegate* unmanaged[Stdcall]<nint, uint, uint, nint*, void>)context.Slot(SetPixelResourcesSlot))(context.P, 0, 2, input);
+        nint renderTarget = destination.Attachment.P;
+        ((delegate* unmanaged[Stdcall]<nint, uint, nint*, nint, void>)context.Slot(SetRenderTargetsSlot))(context.P, 1, &renderTarget, 0);
         var viewport = new Viewport { Width = destination.Width, Height = destination.Height, MaxDepth = 1 };
-        ((delegate* unmanaged[Stdcall]<nint, uint, Viewport*, void>)context.Slot(44))(context.P, 1, &viewport);
-        ((delegate* unmanaged[Stdcall]<nint, uint, uint, void>)context.Slot(13))(context.P, 3, 0);
-        ((delegate* unmanaged[Stdcall]<nint, uint, nint*, nint, void>)context.Slot(33))(context.P, 0, null, 0);
+        ((delegate* unmanaged[Stdcall]<nint, uint, Viewport*, void>)context.Slot(SetViewportsSlot))(context.P, 1, &viewport);
+        ((delegate* unmanaged[Stdcall]<nint, uint, uint, void>)context.Slot(DrawSlot))(context.P, 3, 0);
+        UnbindRenderTarget();
         ClearPixelInputs();
     }
     Com UpscaleNis(ImageSource sourceImage, int outputWidth, int outputHeight, double sharpness)
@@ -148,7 +145,7 @@ internal sealed unsafe partial class D3DPreview
         }
         nisLastImage = null;
         ClearPixelInputs();
-        ((delegate* unmanaged[Stdcall]<nint, uint, nint*, nint, void>)context.Slot(33))(context.P, 0, null, 0);
+        UnbindRenderTarget();
         if (nisSourceWidth != sourceImage.Width || nisSourceHeight != sourceImage.Height || nisOutputWidth != outputWidth || nisOutputHeight != outputHeight)
         {
             foreach (var stage in nisStages) stage.Dispose(); nisStages.Clear();
@@ -194,7 +191,7 @@ internal sealed unsafe partial class D3DPreview
     }
     void DisposeNis()
     {
-        if (context != null) { nint empty = 0; ((delegate* unmanaged[Stdcall]<nint, uint, uint, nint*, void>)context.Slot(71))(context.P, 0, 1, &empty); ((delegate* unmanaged[Stdcall]<nint, uint, uint, nint*, void>)context.Slot(70))(context.P, 0, 1, &empty); ClearPixelInputs(); ClearComputeBindings(); ((delegate* unmanaged[Stdcall]<nint, uint, nint*, nint, void>)context.Slot(33))(context.P, 0, null, 0); }
+        if (context != null) { nint empty = 0; ((delegate* unmanaged[Stdcall]<nint, uint, uint, nint*, void>)context.Slot(71))(context.P, 0, 1, &empty); ((delegate* unmanaged[Stdcall]<nint, uint, uint, nint*, void>)context.Slot(70))(context.P, 0, 1, &empty); ClearPixelInputs(); ClearComputeBindings(); UnbindRenderTarget(); }
         foreach (var stage in nisStages) stage.Dispose(); nisStages.Clear();
         nisConversion?.Dispose(); nisConversion = null;
         nisConstants?.Dispose(); nisShader?.Dispose(); nisScaleView?.Dispose(); nisScaleTexture?.Dispose(); nisUsmView?.Dispose(); nisUsmTexture?.Dispose();

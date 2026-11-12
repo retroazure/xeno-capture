@@ -61,7 +61,7 @@ internal sealed unsafe partial class D3DPreview
         FrameCompute(frameMotion!, frameLow[framePrevious]!.View, frameLow[frameCurrent]!.View, null, null,
             frameForward!.Attachment, frameBackward!.Attachment, frameStatsView, flowWidth, flowHeight);
         CopyFrameStatistics();
-        ((delegate* unmanaged[Stdcall]<nint, void>)context.Slot(111))(context.P);
+        SubmitPendingDraw();
         predictionReadbackPending = true;
         return true;
     }

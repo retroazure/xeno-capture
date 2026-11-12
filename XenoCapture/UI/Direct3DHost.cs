@@ -9,7 +9,7 @@ using System.Windows.Media;
 using XenoCapture.Engine;
 
 namespace XenoCapture.UI;
-internal sealed class Direct3DHost : HwndHost
+internal sealed partial class Direct3DHost : HwndHost
 {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern nint CreateWindowEx(uint exStyle, string className, string name, uint style, int x, int y, int width, int height, nint parent, nint menu, nint module, nint param);
     [DllImport("user32.dll")] static extern bool DestroyWindow(nint window);
@@ -91,17 +91,37 @@ internal sealed class Direct3DHost : HwndHost
     public bool Active
     {
         get { lock (gate) return active; }
-        set { lock (gate) { active = value && !stopping; if (!active) { latest?.Dispose(); latest = null; cadence.Reset(); } if (!stopping) signal.Set(); } }
+        set
+        {
+            lock (gate)
+            {
+                active = value && !stopping;
+                if (!active) ClearPendingCapture();
+                if (!stopping) signal.Set();
+            }
+        }
     }
     public Task SuspendAsync()
     {
-        lock(gate)
+        lock (gate)
         {
-            active=false;latest?.Dispose();latest=null;cadence.Reset();
-            if(stopping)return completed.Task;
-            if(renderer==null)return Task.CompletedTask;
-            inactiveWaiter??=new(TaskCreationOptions.RunContinuationsAsynchronously);signal.Set();return inactiveWaiter.Task;
+            active = false;
+            ClearPendingCapture();
+            if (stopping) return completed.Task;
+            if (renderer == null) return Task.CompletedTask;
+
+            inactiveWaiter ??= new(TaskCreationOptions.RunContinuationsAsynchronously);
+            signal.Set();
+            return inactiveWaiter.Task;
         }
+    }
+
+    // Call while holding the capture gate.
+    void ClearPendingCapture()
+    {
+        latest?.Dispose();
+        latest = null;
+        cadence.Reset();
     }
     public double Sharpness { get => Volatile.Read(ref sharpness); set => Volatile.Write(ref sharpness, value); }
     readonly PreviewRendererHandoff? handoff;
@@ -181,709 +201,32 @@ internal sealed class Direct3DHost : HwndHost
             nint window = CreateWindowEx(0, "static", "Xeno Direct3D Preview", style, 0, 0, 1, 1, parent.Handle, 0, 0, 0);
             if (window == 0) throw new System.ComponentModel.Win32Exception();
             Volatile.Write(ref viewportChangedAt, Clock.Now);
-            renderer = new Thread(() => Run(window)) { IsBackground = true, Name = "Xeno Direct3D video", Priority = ThreadPriority.AboveNormal }; renderer.Start();
+            renderer = new Thread(() => Run(window))
+            {
+                IsBackground = true,
+                Name = "Xeno Direct3D video",
+                Priority = ThreadPriority.AboveNormal
+            };
+            renderer.Start();
             return new HandleRef(this, window);
         }
-    }    public void Submit(Packet frame)
+    }
+
+    public void Submit(Packet frame)
     {
         lock (gate)
         {
             if (stopping || !active || fullscreenDock != null) return;
             if (FrameGeneration is not (FrameGenerationMode.Off or FrameGenerationMode.RecoverGaps)) cadence.Observe(frame);
             bool wake = latest == null || waitingForSourcePacing;
-            latest?.Dispose(); latest = frame.Retain(); latestArrival = Clock.Now;
+            latest?.Dispose();
+            latest = frame.Retain();
+            latestArrival = Clock.Now;
             if (wake) signal.Set();
         }
     }
-    void Run(nint window)
-    {
-        Exception? error = null; bool notify = false; FrameDeadlineWaiter? deadline = null;
-        D3DPreview gpu = null!;
-        Apartment? apartment = null;
-        MultimediaScheduling? scheduling = null;
-        void ReleaseRenderer(bool preserve)
-        {
-            var owned = gpu;
-            gpu = null!;
-            if (owned == null) return;
-            if (preserve && handoff != null)
-            {
-                try
-                {
-                    if (fullscreenDock is { Landed: true } motion)
-                        motion.Surface = owned.RetainPresentationSurface();
-                    owned.DetachWindow();
-                    handoff.Park(owned);
-                    return;
-                }
-                catch { owned.Dispose(); throw; }
-            }
-            owned.Dispose();
-        }
-        Interlocked.Increment(ref liveRenderers);
-        try
-        {
-            scheduling = MultimediaScheduling.Enter("Playback"); apartment = new Apartment();
-            if (handoff == null) gpu = new D3DPreview(window, Volatile.Read(ref pixelWidth), Volatile.Read(ref pixelHeight));
-            FrameGenerationMode previousMode = FrameGenerationMode.Off;
-            bool content30=false, previousContent30=false;
-            HighRateCadence highRateCadence = default;
-            int limitedMultiplier = 0;
-            (double Refresh, long Period, PreviewUpscaler Upscaler, AiVideoSettings Ai) highRateSettings = default;
-            long cadenceEpoch=0,cadenceDue=0,cadenceInputAt=0,cadenceScheduledPeriod=0,consumedArrival=0;
-            int cadencePhase=0,cadenceStep=0;
-            long viewportWaitLimit = Clock.Now + 300_000;
-            long cadenceLead=15_000, lastPresentedAt=0;
-            long lastGeneratedPair = 0;
-            long predictionDue = 0, predictionEnd = 0, predictionArrival = 0, predictionRestoreAt = 0;
-            bool predictionStarted = false, predictionShown = false;
-            bool? predictionReady = null;
-            double predictionDrawMs = 0;
-            long entryRedrawAt = 0;
-            PresentedFrame lastMotionFrame = default;
-            bool entryAnimating = animateFullscreenEntry;
-            bool motionTimerUnavailable = false;
-            bool sourcePacingTimerUnavailable = false;
-            SourceFramePacing sourcePacing = default;
-            FullscreenSourceCadence steadyCadence = default;
-            nint renderSignal = signal.SafeWaitHandle.DangerousGetHandle();
-            long period = 0, sourceCapturePeriod=0, refreshChecked = 0;
-            int sourceWidth = 0, sourceHeight = 0, multiplier = 2; double refreshHz = 0; string? timingFailure = null;
-            bool Alive() { lock (gate) return !stopping && active; }
-            bool Slot(long expires = 0)
-            {
-                uint timeoutMs = expires == 0 ? 20u : (uint)Math.Clamp((expires - Clock.Now + 9_999) / 10_000, 0, 20);
-                var result = gpu.WaitForFrameSlot(renderSignal, timeoutMs);
-                if (result == FrameSlotWait.TimedOut && expires == 0) Interlocked.Increment(ref frameWaitTimeouts);
-                return result == FrameSlotWait.Ready;
-            }
-            Packet? TakeLatest()
-            {
-                lock (gate)
-                {
-                    if (stopping || !active) return null;
-                    var packet = latest;consumedArrival=latestArrival; latest = null; return packet;
-                }
-            }
-            long? LastSourceDisplayTime() => sourcePacing.PresentCount is uint previous
-                && gpu.TryGetDisplayFrame(out var timing) && timing.PresentCount == previous
-                ? timing.DisplayedAt(refreshHz) : null;
-            long SourcePacingDeadline(Packet frame, long arrival, long? displayedAt, bool prepareAhead = false)
-            {
-                long? displayDue = displayedAt is long at
-                    ? sourcePacing.DisplayDeadline(frame.Time, frame.Duration, arrival, refreshHz, at, drawAhead: prepareAhead) : null;
-                if (!prepareAhead && displayDue is long due) return due;
+    void Run(nint window) => new RenderLoop(this, window).Run();
 
-                // AI work starts at capture arrival, so cancel early arrival jitter within the
-                // existing display hold even when DXGI's estimated phase would release it first.
-                long captureDue = sourcePacing.Deadline(frame.Time, frame.Duration, arrival, refreshHz,
-                    useDisplayBudget: displayDue.HasValue);
-                return Math.Max(captureDue, displayDue.GetValueOrDefault());
-            }
-            bool WaitForSourcePacing()
-            {
-                if (entryAnimating || sourcePacingTimerUnavailable) return false;
-                long? displayedAt = LastSourceDisplayTime();
-                long due;
-                lock (gate)
-                {
-                    if (stopping || !active || !smoothSourcePacing || latest is not { } frame) return false;
-                    due = SourcePacingDeadline(frame, latestArrival, displayedAt);
-                    if (due <= Clock.Now) return false;
-                    waitingForSourcePacing = true;
-                }
-                try { return WaitForSourceDeadline(due); }
-                finally { lock (gate) waitingForSourcePacing = false; }
-            }
-            bool WaitForSourceDeadline(long due)
-            {
-                try
-                {
-                    deadline ??= new FrameDeadlineWaiter(signal);
-                    Interlocked.Increment(ref sourcePacingWaits);
-                    deadline.WaitUntil(due);
-                    return true;
-                }
-                catch (System.ComponentModel.Win32Exception) { sourcePacingTimerUnavailable = true; return false; }
-            }
-            bool WaitForMotionRedraw()
-            {
-                long remaining = entryRedrawAt - Clock.Now;
-                if (remaining <= 0) return false;
-                if (!motionTimerUnavailable)
-                {
-                    try
-                    {
-                        deadline ??= new FrameDeadlineWaiter(signal);
-                        deadline.WaitUntil(entryRedrawAt);
-                        return true;
-                    }
-                    catch (System.ComponentModel.Win32Exception) { motionTimerUnavailable = true; }
-                }
-                signal.WaitOne((int)((remaining + 9_999) / 10_000));
-                return true;
-            }
-            Packet? RefreshAfterAiStartup(long previousCreations, long duration)
-            {
-                if (!AiVideo.Enabled || gpu.VsrFeatureCreations == previousCreations || gpu.LastUploadDrawMs <= Math.Max(5, duration / 5000.0))
-                    return null;
-                lock (gate) { if (stopping || !active || latest == null) return null; }
-                gpu.CompleteAiWork();
-                return TakeLatest();
-            }
-            void Requeue(Packet packet)
-            {
-                lock (gate) { if (!stopping && active) { if(latest==null){latest=packet.Retain();latestArrival=consumedArrival;} signal.Set(); } }
-            }
-            void PrepareDraw(bool updateAi = true)
-            {
-                if (updateAi) gpu.AiVideo = AiVideo;
-                gpu.Resize(Volatile.Read(ref pixelWidth), Volatile.Read(ref pixelHeight));
-                gpu.EdgeSmoothing = EdgeSmoothing;
-                gpu.RetainFullscreenOutput = isFullscreen || animateFullscreenEntry;
-                if (entryAnimating)
-                {
-                    long started = FullscreenEntryStarted;
-                    gpu.PresentationScale = FullscreenMotion.Scale(started == 0 ? 0 : Clock.Now - started);
-                }
-            }
-            bool Publish(PresentedFrame frame, bool restoreSource = false, uint refreshInterval = 1)
-            {
-                bool accepted = gpu.Present(allowBlocking: frame.Kind == PresentationKind.Source || restoreSource,
-                    syncInterval: SmoothSourcePacing ? refreshInterval : 0);
-                LastSubmissionMs = gpu.LastUploadDrawMs;
-                Volatile.Write(ref enhancedUpscalingActive, gpu.UsedEnhancedUpscaling); Volatile.Write(ref rtxVideoRequested,gpu.RtxVideoRequested); Volatile.Write(ref upscalingFallbackReason, gpu.UpscalingFallbackReason);
-                PublishAiStatus();
-                if (!accepted) return false;
-                lastPresentedAt = Clock.Now;
-                if (!entryAnimating && multiplier == 4 && HighRateCadence.Eligible(period) && FrameGenerationActive)
-                    highRateCadence.Observe(lastPresentedAt, period);
-                if (frame.Kind != PresentationKind.Repeated) lastMotionFrame = frame;
-                if (entryAnimating)
-                {
-                    StartFullscreenEntry(lastPresentedAt);
-                    entryRedrawAt = lastPresentedAt + EntryRedrawInterval;
-                    entryAnimating = gpu.PresentationScale < 1;
-                }
-                if (frame.Kind is PresentationKind.Interpolated or PresentationKind.Predicted)
-                    Interlocked.Increment(ref generatedPresentations);
-                if (frame.Kind == PresentationKind.Repeated) Interlocked.Increment(ref repeatedPresentations);
-                FramePresented?.Invoke(frame);
-                var displayObserver = DiagnosticDisplayFrame;
-                if (displayObserver != null && gpu.TryGetDisplayFrame(out var timing))
-                    displayObserver(timing.PresentCount, timing.PresentRefreshCount);
-                return true;
-            }
-            void PublishAiStatus()
-            {
-                Volatile.Write(ref vsrFeatureCreations, gpu.VsrFeatureCreations);
-                Volatile.Write(ref aiVideoActive, gpu.AiVideoActive);
-                Volatile.Write(ref aiVideoStatus, gpu.AiVideoStatus);
-                Volatile.Write(ref aiVideoFallbackReason, gpu.AiVideoFallbackReason);
-            }
-            void PublishIdleAiStatus()
-            {
-                Volatile.Write(ref aiVideoActive, false);
-                Volatile.Write(ref aiVideoFallbackReason, null);
-                Volatile.Write(ref aiVideoStatus, AiVideo.Enabled ? "AI Video SR · waiting for video" : "Off");
-            }
-            void Status(string text) { if (FrameGenerationStatus != text) Volatile.Write(ref frameGenerationStatus, text); }
-            long ContentPeriod(long capture)=>content30 ? FrameGenerationPolicy.Content30Period(capture):cadence.Period(capture);
-            bool CanShowPrediction(FrameGenerationMode requested)
-            {
-                lock (gate)
-                    return !stopping && active && latest == null && FrameGeneration == requested && Capped30Game == content30;
-            }
-            bool ShowPrediction(FrameGenerationMode requested, long interval, bool recoveringGaps)
-            {
-                if (predictionDue == 0 || predictionDue > predictionEnd || predictionReady == false)
-                {
-                    if (!predictionShown) return false;
-                    if (Clock.Now < predictionRestoreAt) { deadline!.WaitUntil(predictionRestoreAt); return true; }
-                    if (!Slot() || !CanShowPrediction(requested)) return true;
-                    // If the source stalls, settle on the last real image.
-                    PrepareDraw();
-                    gpu.RenderCachedFrame(Sharpness, Upscaler);
-                    if (CanShowPrediction(requested))
-                    {
-                        Publish(gpu.CachedFrame with { Kind = PresentationKind.Repeated }, restoreSource: true);
-                        predictionShown = false;
-                    }
-                    return true;
-                }
-
-                if (!CanShowPrediction(requested)) return true;
-                long due = predictionDue;
-                long expires = Math.Min(predictionEnd, due + interval / 2);
-                long now = Clock.Now;
-                if (now > expires) { predictionDue += interval; return true; }
-                // Gap recovery leaves the GPU alone during normal source cadence.
-                long analysisDue = predictionArrival + interval;
-                if (recoveringGaps && now < analysisDue) { deadline!.WaitUntil(analysisDue); return true; }
-                if (!predictionStarted)
-                {
-                    predictionStarted = true;
-                    if (!gpu.BeginPrediction()) { predictionReady = false; return true; }
-                }
-                long lead = recoveringGaps ? 0
-                    : Math.Clamp((long)(predictionDrawMs * 10_000) + 2_500, 2_500, Math.Min(15_000, interval / 4));
-                if (now < due - lead) { deadline!.WaitUntil(due - lead); return true; }
-                predictionReady ??= gpu.PredictionReady();
-                long retryAt = recoveringGaps ? Math.Min(expires, due + 20_000) : due;
-                if (predictionReady == null && Clock.Now < retryAt) { deadline!.WaitUntil(retryAt); return true; }
-                predictionDue += interval;
-                if (predictionReady != true || !Slot(expires) || Clock.Now > expires || !CanShowPrediction(requested)) return true;
-
-                PrepareDraw();
-                if (Clock.Now > expires || !CanShowPrediction(requested)) return true;
-                var frame = gpu.RenderPrediction(due - predictionArrival, interval, Sharpness, Upscaler);
-                predictionDrawMs = gpu.LastUploadDrawMs;
-                while (Clock.Now < due && CanShowPrediction(requested)) deadline!.WaitUntil(due);
-                if (Clock.Now <= expires && CanShowPrediction(requested))
-                    predictionShown |= Publish(frame);
-                return true;
-            }
-            bool Prepare(Packet packet)
-            {
-                sourceWidth = packet.Width; sourceHeight = packet.Height; sourceCapturePeriod=packet.Duration; period = ContentPeriod(packet.Duration);
-                if (!gpu.PrepareInterpolation(packet,period,true))
-                {
-                    Volatile.Write(ref frameGenerationActive, false);
-                    Status(gpu.FrameGenerationFailure ?? "Unavailable"); Requeue(packet); return false;
-                }
-                if (gpu.FrameWasDuplicate) Interlocked.Increment(ref skippedCaptureDuplicates);
-                Status($"{(content30 ? "30 FPS game · " : "")}{multiplier}× · {(limitedMultiplier != 0 ? "4× limited by presentation · " : "")}{10_000_000.0 / period:0}→{10_000_000.0 * multiplier / period:0} fps · {gpu.FrameGenerationDetail}");
-                Volatile.Write(ref frameGenerationActive, true); return true;
-            }
-            void SetCadence(long epoch)
-            {
-                cadenceEpoch = epoch;
-                cadencePhase = 1;
-                cadenceScheduledPeriod = period;
-                cadenceDue = FrameGenerationPolicy.PhaseTime(cadenceEpoch, period, cadencePhase, multiplier);
-            }
-            void AdvanceCadence(int phases)
-            {
-                int position = cadencePhase - 1 + phases;
-                cadenceEpoch += (position / multiplier) * period;
-                cadencePhase = position % multiplier + 1;
-                cadenceDue = FrameGenerationPolicy.PhaseTime(cadenceEpoch, period, cadencePhase, multiplier);
-            }
-            void AlignPair()
-            {
-                long measuredLead = FrameGenerationPolicy.CadenceLead(period, multiplier, gpu.FrameAnalysisMs);
-                cadenceLead = measuredLead >= cadenceLead ? measuredLead : cadenceLead + (measuredLead - cadenceLead) / 4;
-                long interval = period / multiplier;
-                long desired = consumedArrival + cadenceLead;
-                if (cadenceScheduledPeriod != period || Math.Abs(desired - cadenceDue) > interval / 2)
-                {
-                    // Rejoin a changed cadence or a missed input boundary
-                    // while giving the last displayed frame a usable interval.
-                    long firstDue = Math.Max(desired, lastPresentedAt + interval * 3 / 4);
-                    SetCadence(firstDue - interval);
-                    return;
-                }
-                long correction = FrameGenerationPolicy.GameCadenceCorrection(desired, cadenceDue, period);
-                cadenceEpoch += correction;
-                cadenceDue += correction;
-            }
-            while (true)
-            {
-                bool enabled, pending;
-                long candidatePeriod;
-                PixelLayout? candidateLayout;
-                int candidateWidth, candidateHeight;
-                lock (gate)
-                {
-                    if (stopping) break; enabled = active; pending = enabled && latest != null;
-                    candidateLayout = latest?.Layout;
-                    candidatePeriod = latest?.Duration ?? sourceCapturePeriod; candidateWidth = latest?.Width ?? sourceWidth; candidateHeight = latest?.Height ?? sourceHeight;
-                }
-                var requested = FrameGeneration; multiplier = FrameGenerationPolicy.Multiplier(requested); content30=Capped30Game;
-                int predictiveTarget = FrameGenerationPolicy.PredictiveTarget(requested);
-                bool recoveringGaps = requested == FrameGenerationMode.RecoverGaps;
-                bool predictionRequested = predictiveTarget > 0 || recoveringGaps;
-                if(!enabled)
-                {
-                    if (handoff == null) { gpu!.AiVideo = AiVideo; gpu.SuspendEnhancements(); PublishAiStatus(); }
-                    else
-                    {
-                        if (gpu != null) { gpu.AiVideo = AiVideo; ReleaseRenderer(true); }
-                        PublishIdleAiStatus();
-                    }
-                    timingFailure=null;previousMode=requested;previousContent30=content30;cadenceDue=0;cadenceStep=0;Volatile.Write(ref frameGenerationActive,false);
-                    predictionDue = 0; predictionShown = false;
-                    sourcePacing = default;
-                    steadyCadence = default;
-                    lock(gate){inactiveWaiter?.TrySetResult();inactiveWaiter=null;}
-                    signal.WaitOne();continue;
-                }
-                if (Volatile.Read(ref fullscreenDock) is { } docking)
-                {
-                    long presentedAt = docking.PresentedAt;
-                    if (gpu?.CanRedrawFullscreenMotion != true || (presentedAt != 0 && docking.Sample(presentedAt).Complete))
-                    {
-                        signal.WaitOne();
-                        continue;
-                    }
-                    if (WaitForMotionRedraw() || !Slot() || !Alive()) continue;
-                    long sampleTime = Clock.Now;
-                    PrepareDraw(updateAi: false);
-                    gpu.RedrawFullscreenMotion(docking.Sample(sampleTime).Clip);
-                    if (Publish(lastMotionFrame with { Kind = PresentationKind.Repeated })) docking.Presented(sampleTime);
-                    entryRedrawAt = sampleTime + EntryRedrawInterval;
-                    continue;
-                }
-                if (gpu == null)
-                {
-                    // Auto sizes inference to the fullscreen viewport. Avoid
-                    // presenting at a transient size immediately before DXGI resize.
-                    if (isFullscreen && AiVideo is { Enabled: true, OutputHeight: 0 }
-                        && !(requested == FrameGenerationMode.Off && candidateLayout == PixelLayout.Nv12 && FullscreenViewportReady()))
-                    {
-                        long readyAt = Math.Min(viewportWaitLimit, Volatile.Read(ref viewportChangedAt) + 120_000);
-                        if (Clock.Now < readyAt)
-                        {
-                            try
-                            {
-                                deadline ??= new FrameDeadlineWaiter(signal);
-                                deadline.WaitUntil(readyAt);
-                                continue;
-                            }
-                            catch (System.ComponentModel.Win32Exception) { viewportWaitLimit = 0; }
-                        }
-                    }
-                    var retained = handoff?.Take();
-                    if (retained == null && !pending) { PublishIdleAiStatus(); signal.WaitOne(); continue; }
-                    int w = Volatile.Read(ref pixelWidth), h = Volatile.Read(ref pixelHeight);
-                    if (retained == null) gpu = new D3DPreview(window, w, h);
-                    else { gpu = retained; gpu.AttachWindow(window, w, h); }
-                }
-                gpu.AiVideo = AiVideo; PublishAiStatus();
-                if(requested!=previousMode || content30!=previousContent30)
-                {
-                    if(gpu.HasInterpolationFrame || requested!=previousMode)gpu.ResetInterpolation();
-                    timingFailure=null;previousMode=requested;previousContent30=content30;cadenceDue=0;cadenceStep=0;Volatile.Write(ref frameGenerationActive,false);
-                    highRateCadence = default;
-                    limitedMultiplier = 0;
-                    predictionDue = 0; predictionShown = false;
-                    sourcePacing = default;
-                }
-                bool generating = false;
-                bool paceSource = (requested == FrameGenerationMode.Off || recoveringGaps) && SmoothSourcePacing;
-                bool steadySource = isFullscreen && paceSource && requested == FrameGenerationMode.Off
-                    && SteadyFullscreenPacing && !entryAnimating;
-                if (!steadySource) steadyCadence = default;
-                if ((multiplier > 1 || predictionRequested || paceSource) && (pending || gpu.HasInterpolationFrame))
-                {
-                    if (Clock.Now - refreshChecked > 10_000_000 || refreshChecked == 0)
-                    {
-                        double currentRefresh = DiagnosticRefreshRate > 0 ? DiagnosticRefreshRate : DisplayTiming.RefreshRate(window);
-                        if (refreshHz != currentRefresh)
-                        {
-                            sourcePacing = default;
-                            steadyCadence = default;
-                        }
-                        refreshHz = currentRefresh;
-                        refreshChecked = Clock.Now;
-                    }
-                }
-                if (multiplier > 1 && (pending || gpu.HasInterpolationFrame))
-                {
-                    long contentPeriod = ContentPeriod(candidatePeriod);
-                    generating = timingFailure == null && gpu.FrameGenerationFailure == null && FrameGenerationPolicy.CanGenerate(contentPeriod, refreshHz, candidateWidth, candidateHeight, multiplier);
-                    if (cadenceStep == 0)
-                    {
-                        var settings = (refreshHz, contentPeriod, Upscaler, AiVideo);
-                        if (settings != highRateSettings || !generating || multiplier != 4 || !HighRateCadence.Eligible(contentPeriod))
-                        {
-                            highRateCadence = default;
-                            if (limitedMultiplier != 0) cadenceScheduledPeriod = 0;
-                            limitedMultiplier = 0;
-                            highRateSettings = settings;
-                        }
-                        else if (limitedMultiplier == 0 && highRateCadence.NeedsLowerMultiplier)
-                        {
-                            limitedMultiplier = FrameGenerationPolicy.HighRateFallbackMultiplier(
-                                contentPeriod, refreshHz, isFullscreen && SmoothSourcePacing);
-                            cadenceScheduledPeriod = 0;
-                        }
-                    }
-                    if (generating && limitedMultiplier != 0) multiplier = limitedMultiplier;
-                    if (!generating)
-                    {
-                        string reason = timingFailure ?? gpu.FrameGenerationFailure ?? ((long)candidateWidth * candidateHeight > 1920L * 1080 ? "1080p input limit"
-                            : candidatePeriod <= 0 ? "Waiting for source timing" : refreshHz < 2 ? "Display refresh rate unavailable"
-                            : $"Needs {10_000_000.0 * multiplier / (ContentPeriod(candidatePeriod)):0} Hz · screen {refreshHz:0} Hz");
-                        Status(reason);
-                    }
-                }
-                int activeMultiplier = generating ? multiplier : 0;
-                if (EffectiveFrameGenerationMultiplier != activeMultiplier)
-                    Volatile.Write(ref effectiveFrameGenerationMultiplier, activeMultiplier);
-                if (!generating)
-                {
-                    long PredictionInterval(long contentPeriod) => recoveringGaps
-                        ? (SourceFramePacing.HasRefreshHeadroom(refreshHz, contentPeriod) ? contentPeriod : 0)
-                        : FrameGenerationPolicy.PredictionInterval(predictiveTarget, refreshHz, contentPeriod);
-                    long predictionInterval = predictionRequested
-                        ? PredictionInterval(recoveringGaps ? candidatePeriod : ContentPeriod(candidatePeriod)) : 0;
-                    bool predicting = predictionInterval > 0 && (long)candidateWidth * candidateHeight <= 1920L * 1080
-                        && gpu.FrameGenerationFailure == null && timingFailure == null;
-                    if (predicting && deadline == null)
-                    {
-                        try { deadline = new FrameDeadlineWaiter(signal); }
-                        catch (System.ComponentModel.Win32Exception) { timingFailure = "Accurate frame timing unavailable"; predicting = false; }
-                    }
-                    if (!predicting)
-                    {
-                        if (gpu.HasInterpolationFrame) gpu.ResetInterpolation();
-                        predictionDue = 0; predictionShown = false;
-                        Volatile.Write(ref frameGenerationActive, false);
-                    }
-                    cadenceDue=0; cadenceStep=0;
-                    if (requested == FrameGenerationMode.Off) Status("Off");
-                    else if (predictionRequested && (pending || candidatePeriod > 0))
-                        Status(timingFailure ?? gpu.FrameGenerationFailure ?? ((long)candidateWidth * candidateHeight > 1920L * 1080
-                            ? "Motion prediction supports up to 1080p input · showing source"
-                            : refreshHz <= 1 ? "Display refresh rate unavailable · showing source"
-                            : candidatePeriod <= 0 ? "Waiting for source timing"
-                            : !predicting ? recoveringGaps ? "Gap recovery needs more display refresh headroom" : "Showing source at its native cadence"
-                            : recoveringGaps ? "Gap recovery · late captures only · no frame buffering"
-                            : $"{Math.Min(predictiveTarget, refreshHz):0} fps target · no frame buffering"));
-                    if (!pending)
-                    {
-                        if (predicting && ShowPrediction(requested, predictionInterval, recoveringGaps)) continue;
-                        if (entryAnimating && FullscreenEntryStarted != 0 && gpu.CanRedrawFullscreenMotion)
-                        {
-                            if (WaitForMotionRedraw() || !Slot() || !Alive()) continue;
-                            lock (gate) { if (latest != null) continue; }
-                            // New captures wake the wait and keep priority. Between them,
-                            // move the prepared image without uploading or upscaling it again.
-                            PrepareDraw(updateAi: false);
-                            gpu.RedrawFullscreenMotion();
-                            lock (gate) { if (latest != null) continue; }
-                            if (!Publish(lastMotionFrame with { Kind = PresentationKind.Repeated }))
-                                entryRedrawAt = Clock.Now + EntryRedrawInterval;
-                            continue;
-                        }
-                        signal.WaitOne(); lock (gate) { if (!stopping && active && latest == null) Interlocked.Increment(ref emptyWakeups); }
-                        continue;
-                    }
-                    if (!Slot() || !Alive() || FrameGeneration != requested || Capped30Game != content30) continue;
-                    // ResizeBuffers can stall. Keep the capture slot replaceable until it completes.
-                    PrepareDraw();
-                    uint clockInterval = steadySource ? FullscreenSourceCadence.RefreshInterval(candidatePeriod, refreshHz) : 0;
-                    if (clockInterval == 0) steadyCadence = default;
-                    bool prepareAhead = isFullscreen && paceSource && (gpu.AiVideo.Enabled || clockInterval != 0)
-                        && !entryAnimating && !sourcePacingTimerUnavailable;
-                    if (paceSource && !prepareAhead && WaitForSourcePacing()) continue;
-                    DiagnosticBeforeFrameLatch?.Invoke();
-                    using var frame = TakeLatest();
-                    if (frame == null) { Interlocked.Increment(ref skippedAfterWait); continue; }
-                    uint sourceInterval = prepareAhead && clockInterval != 0
-                        ? FullscreenSourceCadence.RefreshInterval(frame.Duration, refreshHz) : 0;
-                    long sourceDue = 0, steadySubmitBy = 0;
-                    if (sourceInterval != 0)
-                        sourceDue = steadyCadence.Deadline(frame.Time, frame.Duration, consumedArrival, refreshHz, out steadySubmitBy);
-                    else if (prepareAhead)
-                    {
-                        sourceDue = SourcePacingDeadline(frame, consumedArrival, LastSourceDisplayTime(), prepareAhead: true);
-                    }
-                    long featureCreations = gpu.VsrFeatureCreations;
-                    bool DrawLiveSource(Packet source, bool allowRepeatSkip)
-                    {
-                        if (predictionRequested)
-                        {
-                            sourceWidth = source.Width; sourceHeight = source.Height; sourceCapturePeriod = source.Duration;
-                            period = recoveringGaps ? source.Duration : ContentPeriod(source.Duration);
-                            predictionInterval = PredictionInterval(period);
-                            if (predicting && predictionInterval > 0 && (long)source.Width * source.Height <= 1920L * 1080
-                                && gpu.CachePredictionSource(source, period, allowRepeatSkip && period > source.Duration * 3 / 2))
-                            {
-                                if (gpu.FrameWasDuplicate) { Interlocked.Increment(ref skippedCaptureDuplicates); return false; }
-                                gpu.RenderCachedFrame(Sharpness, Upscaler);
-                                return true;
-                            }
-                            if (gpu.HasInterpolationFrame) gpu.ResetInterpolation();
-                        }
-                        gpu.Draw(source, Sharpness, Upscaler);
-                        return true;
-                    }
-                    if (!DrawLiveSource(frame, allowRepeatSkip: !entryAnimating)) continue;
-                    predictionDue = 0; predictionShown = false;
-                    DiagnosticAfterSourceDraw?.Invoke();
-                    // Refresh at most once after a long draw so bursts cannot starve presentation.
-                    using var fresh = RefreshAfterAiStartup(featureCreations, frame.Duration)
-                        ?? (Clock.Now - consumedArrival >= Math.Max(50_000, frame.Duration) ? TakeLatest() : null);
-                    if (fresh != null) DrawLiveSource(fresh, allowRepeatSkip: false);
-                    else if (sourceDue > Clock.Now && SmoothSourcePacing && FrameGeneration == requested && Alive())
-                    {
-                        // Start GPU work during the hold so it can finish before the present deadline.
-                        gpu.SubmitPendingDraw();
-                        while (sourceDue > Clock.Now && SmoothSourcePacing && FrameGeneration == requested
-                            && (sourceInterval == 0 || SteadyFullscreenPacing) && Alive())
-                        {
-                            if (!WaitForSourceDeadline(sourceDue)) break;
-                        }
-                    }
-                    if (!Alive()) continue;
-                    var shown = fresh ?? frame;
-                    // A missed deadline should let the next capture catch up at the next refresh.
-                    uint refreshInterval = sourceInterval != 0 && fresh == null && SteadyFullscreenPacing
-                        && FrameGeneration == requested && Clock.Now < steadySubmitBy
-                        ? sourceInterval : 1;
-                    bool accepted = Publish(new PresentedFrame(shown.Time, shown.Duration), refreshInterval: refreshInterval);
-                    if (accepted && (requested == FrameGenerationMode.Off || recoveringGaps))
-                    {
-                        // Steady cadence tracks the capture clock without a DXGI present counter.
-                        uint? presentCount = sourceInterval == 0 && isFullscreen && paceSource && !entryAnimating
-                            && SourceFramePacing.HasRefreshHeadroom(refreshHz, shown.Duration) ? gpu.LastPresentCount() : null;
-                        sourcePacing = new(shown.Time, shown.Duration, consumedArrival, presentCount);
-                    }
-                    if (predicting)
-                    {
-                        bool hasPair = accepted && gpu.HasInterpolationPair;
-                        Volatile.Write(ref frameGenerationActive, hasPair);
-                        if (hasPair)
-                        {
-                            predictionArrival = consumedArrival;
-                            if (recoveringGaps)
-                            {
-                                predictionDue = Math.Max(lastPresentedAt + period / 2,
-                                    consumedArrival + period + FrameGenerationPolicy.GapRecoveryGrace(period));
-                                predictionEnd = consumedArrival + FrameGenerationPolicy.GapRecoveryExpiry(period);
-                                predictionRestoreAt = consumedArrival + period * 3;
-                            }
-                            else
-                            {
-                                predictionDue = lastPresentedAt + predictionInterval;
-                                predictionEnd = consumedArrival + period - predictionInterval / 4;
-                                predictionRestoreAt = consumedArrival + period + predictionInterval / 2;
-                            }
-                            predictionStarted = false; predictionReady = null;
-                        }
-                    }
-                    continue;
-                }
-                try { deadline ??= new FrameDeadlineWaiter(signal); } catch (System.ComponentModel.Win32Exception) { timingFailure = "Accurate frame timing unavailable"; continue; }
-                { // Pace distinct game frames for both automatic and forced-30 cadence.
-                    if (!gpu.HasInterpolationFrame)
-                    {
-                        if (!pending) { signal.WaitOne(); continue; }
-                        if (!Slot() || !Alive() || FrameGeneration!=requested || Capped30Game!=content30) continue;
-                        using var first=TakeLatest(); if (first==null || !Prepare(first)) continue;
-                        PrepareDraw();
-                        long featureCreations = gpu.VsrFeatureCreations;
-                        gpu.RenderCachedFrame(Sharpness, Upscaler);
-                        using var fresh = RefreshAfterAiStartup(featureCreations, period);
-                        if (fresh != null && Prepare(fresh)) gpu.RenderCachedFrame(Sharpness, Upscaler);
-                        Publish(gpu.CachedFrame);
-                        cadenceLead = FrameGenerationPolicy.CadenceLead(period, multiplier, gpu.FrameAnalysisMs);
-                        SetCadence(Math.Max(Clock.Now, consumedArrival + cadenceLead));
-                        cadenceStep=0; cadenceInputAt=Clock.Now; continue;
-                    }
-                    // The two-image history must not be overwritten until every
-                    // intermediate and the current real frame have been displayed.
-                    if (pending && cadenceStep==0)
-                    {
-                        using var next=TakeLatest();
-                        if (next!=null)
-                        {
-                            if (!Prepare(next)) continue;
-                            cadenceInputAt=Clock.Now;
-                            if (!gpu.FrameWasDuplicate)
-                            {
-                                cadenceStep=gpu.HasInterpolationPair ? 1:multiplier;
-                                AlignPair();
-                            }
-                        }
-                    }
-                    if (!pending && Clock.Now-cadenceInputAt>Math.Max(period*3,1_000_000))
-                    {
-                        gpu.ResetInterpolation(); cadenceDue=0; cadenceStep=0; Volatile.Write(ref frameGenerationActive,false);
-                        highRateCadence = default;
-                        limitedMultiplier = 0;
-                        Status("Waiting for video"); signal.WaitOne(); continue;
-                    }
-                    if (cadenceScheduledPeriod != period) SetCadence(Clock.Now);
-                    // Submit the GPU work just ahead of the presentation
-                    // deadline, so its variable cost does not shift the phase.
-                    long interval = period / multiplier;
-                    long lead = cadenceStep == 0 ? 0 : Math.Clamp((long)(gpu.LastUploadDrawMs * 10_000) + 2_500,
-                        2_500, Math.Min(15_000, interval / 4));
-                    long renderDue = cadenceDue - lead;
-                    if (Clock.Now < renderDue) { deadline.WaitUntil(renderDue); continue; }
-                    if (!Slot() || !Alive() || FrameGeneration != requested || Capped30Game != content30) continue;
-                    if (cadenceStep == 0)
-                    {
-                        lock (gate) { if (latest != null) continue; }
-                    }
-                    long now = Clock.Now;
-                    int missed = FrameGenerationPolicy.MissedPhases(now, cadenceDue, period, multiplier);
-                    if (missed >= multiplier)
-                    {
-                        // A full content interval was lost. Show the newest
-                        // capture and start a fresh phase sequence.
-                        using var fresh = TakeLatest();
-                        if (fresh != null)
-                        {
-                            if (!Prepare(fresh)) continue;
-                            cadenceInputAt = consumedArrival;
-                        }
-                        SetCadence(now - period / multiplier);
-                        cadenceStep = multiplier;
-                    }
-                    else if (missed > 0)
-                    {
-                        if (cadenceStep > 0) cadenceStep = Math.Min(multiplier, cadenceStep + missed);
-                        AdvanceCadence(missed);
-                        if (now < cadenceDue) continue;
-                    }
-                    PrepareDraw();
-                    bool intermediate = cadenceStep > 0 && cadenceStep < multiplier;
-                    long pair = gpu.InterpolationPairRevision;
-                    PresentedFrame shown;
-                    if (intermediate)
-                        shown = gpu.RenderIntermediate(cadenceStep, multiplier, Sharpness, Upscaler);
-                    else
-                    {
-                        gpu.RenderCachedFrame(Sharpness, Upscaler);
-                        shown = cadenceStep == multiplier ? gpu.CachedFrame : gpu.CachedFrame with { Kind = PresentationKind.Repeated };
-                    }
-                    while (Clock.Now < cadenceDue && Alive() && FrameGeneration == requested && Capped30Game == content30)
-                        deadline.WaitUntil(cadenceDue);
-                    if (!Alive() || FrameGeneration != requested || Capped30Game != content30) continue;
-                    if (intermediate && FrameGenerationPolicy.MissedPhases(Clock.Now, cadenceDue, period, multiplier) > 0) continue;
-                    if (cadenceStep == 0)
-                    {
-                        lock (gate) { if (latest != null) continue; }
-                    }
-                    // Do not jump back to the older source after a generated phase has already been shown.
-                    if (FrameGenerationPolicy.ShouldPresentPhase(shown.Kind, intermediate, pair, lastGeneratedPair))
-                    {
-                        if (Publish(shown) && shown.Kind == PresentationKind.Interpolated)
-                            lastGeneratedPair = pair;
-                    }
-                    cadenceStep = intermediate ? cadenceStep + 1 : 0;
-                    AdvanceCadence(1); continue;
-                }
-
-            }
-        }
-        catch (Exception ex) { error = ex; lock (gate) notify = !stopping; }
-        finally
-        {
-            try { ReleaseRenderer(error == null && !releaseOnStop); }
-            catch (Exception ex) { if (error == null) { error = ex; lock (gate) notify = !stopping; } }
-            deadline?.Dispose();
-            apartment?.Dispose();
-            scheduling?.Dispose();
-            lock (gate) { stopping = true; active = false; latest?.Dispose(); latest = null;inactiveWaiter?.TrySetException(error??new ObjectDisposedException(nameof(Direct3DHost)));inactiveWaiter=null; signal.Dispose(); }
-            if (notify && error != null) { try { Failed?.Invoke(error); } catch { } }
-            Interlocked.Decrement(ref liveRenderers); completed.TrySetResult();
-        }
-    }
     bool IsPreviewShortcut(int message, nint key)
     {
         const int keyDown = 0x100, f11 = 122, escape = 27;
@@ -918,9 +261,19 @@ internal sealed class Direct3DHost : HwndHost
         {
             if (releaseRenderer) releaseOnStop = true;
             if (stopping) return;
-            stopping = true; active = false; latest?.Dispose(); latest = null;
-            if (renderer == null) { signal.Dispose(); completed.TrySetResult(); }
-            else signal.Set();
+            stopping = true;
+            active = false;
+            latest?.Dispose();
+            latest = null;
+            if (renderer == null)
+            {
+                signal.Dispose();
+                completed.TrySetResult();
+            }
+            else
+            {
+                signal.Set();
+            }
         }
     }
     public Task StopAsync(bool releaseRenderer = false)
@@ -933,7 +286,8 @@ internal sealed class Direct3DHost : HwndHost
     {
         RequestStop();
         // Keep the HWND alive until its render thread has released the swap chain.
-        renderer?.Join(); DestroyWindow(handle.Handle);
+        renderer?.Join();
+        DestroyWindow(handle.Handle);
     }
 }
 
