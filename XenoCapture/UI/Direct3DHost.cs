@@ -242,7 +242,7 @@ internal sealed class Direct3DHost : HwndHost
             long entryRedrawAt = 0;
             PresentedFrame lastMotionFrame = default;
             bool entryAnimating = animateFullscreenEntry;
-            bool entryTimerUnavailable=false;
+            bool motionTimerUnavailable = false;
             bool sourcePacingTimerUnavailable = false;
             SourceFramePacing sourcePacing = default;
             FullscreenSourceCadence steadyCadence = default;
@@ -305,6 +305,23 @@ internal sealed class Direct3DHost : HwndHost
                     return true;
                 }
                 catch (System.ComponentModel.Win32Exception) { sourcePacingTimerUnavailable = true; return false; }
+            }
+            bool WaitForMotionRedraw()
+            {
+                long remaining = entryRedrawAt - Clock.Now;
+                if (remaining <= 0) return false;
+                if (!motionTimerUnavailable)
+                {
+                    try
+                    {
+                        deadline ??= new FrameDeadlineWaiter(signal);
+                        deadline.WaitUntil(entryRedrawAt);
+                        return true;
+                    }
+                    catch (System.ComponentModel.Win32Exception) { motionTimerUnavailable = true; }
+                }
+                signal.WaitOne((int)((remaining + 9_999) / 10_000));
+                return true;
             }
             Packet? RefreshAfterAiStartup(long previousCreations, long duration)
             {
@@ -509,14 +526,12 @@ internal sealed class Direct3DHost : HwndHost
                         signal.WaitOne();
                         continue;
                     }
-                    long remaining = entryRedrawAt - Clock.Now;
-                    if (remaining > 0) { signal.WaitOne((int)((remaining + 9_999) / 10_000)); continue; }
-                    if (!Slot() || !Alive()) continue;
+                    if (WaitForMotionRedraw() || !Slot() || !Alive()) continue;
                     long sampleTime = Clock.Now;
                     PrepareDraw(updateAi: false);
                     gpu.RedrawFullscreenMotion(docking.Sample(sampleTime).Clip);
                     if (Publish(lastMotionFrame with { Kind = PresentationKind.Repeated })) docking.Presented(sampleTime);
-                    entryRedrawAt = Clock.Now + EntryRedrawInterval;
+                    entryRedrawAt = sampleTime + EntryRedrawInterval;
                     continue;
                 }
                 if (gpu == null)
@@ -641,23 +656,7 @@ internal sealed class Direct3DHost : HwndHost
                         if (predicting && ShowPrediction(requested, predictionInterval, recoveringGaps)) continue;
                         if (entryAnimating && FullscreenEntryStarted != 0 && gpu.CanRedrawFullscreenMotion)
                         {
-                            long remaining = entryRedrawAt - Clock.Now;
-                            if (remaining > 0)
-                            {
-                                if (!entryTimerUnavailable)
-                                {
-                                    try
-                                    {
-                                        deadline ??= new FrameDeadlineWaiter(signal);
-                                        deadline.WaitUntil(entryRedrawAt);
-                                        continue;
-                                    }
-                                    catch (System.ComponentModel.Win32Exception) { entryTimerUnavailable = true; }
-                                }
-                                signal.WaitOne((int)((remaining + 9_999) / 10_000));
-                                continue;
-                            }
-                            if (!Slot() || !Alive()) continue;
+                            if (WaitForMotionRedraw() || !Slot() || !Alive()) continue;
                             lock (gate) { if (latest != null) continue; }
                             // New captures wake the wait and keep priority. Between them,
                             // move the prepared image without uploading or upscaling it again.
@@ -737,7 +736,8 @@ internal sealed class Direct3DHost : HwndHost
                     bool accepted = Publish(new PresentedFrame(shown.Time, shown.Duration), refreshInterval: refreshInterval);
                     if (accepted && (requested == FrameGenerationMode.Off || recoveringGaps))
                     {
-                        uint? presentCount = isFullscreen && paceSource && !entryAnimating
+                        // Steady cadence tracks the capture clock without a DXGI present counter.
+                        uint? presentCount = sourceInterval == 0 && isFullscreen && paceSource && !entryAnimating
                             && SourceFramePacing.HasRefreshHeadroom(refreshHz, shown.Duration) ? gpu.LastPresentCount() : null;
                         sourcePacing = new(shown.Time, shown.Duration, consumedArrival, presentCount);
                     }

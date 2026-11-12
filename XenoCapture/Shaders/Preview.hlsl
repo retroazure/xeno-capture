@@ -2,9 +2,9 @@ struct Out {float4 pos:SV_POSITION; float2 uv:TEXCOORD;}; Out Vertex(uint id:SV_
 
 Texture2D image:register(t0); Texture2D chroma:register(t1); SamplerState linearClamp:register(s0);
 cbuffer Parameters:register(b0) { float4 p; float4 flags; float4 aiFootprint; };
-float3 color(float2 uv) {
+float3 color(float2 uv, bool nv12) {
  float3 c=image.Sample(linearClamp,uv).rgb;
- if(p.w>0.5) { float y=c.r; float2 cc=chroma.Sample(linearClamp,uv).rg-128.0/255.0;
+ if(nv12) { float y=c.r; float2 cc=chroma.Sample(linearClamp,uv).rg-128.0/255.0;
   if(flags.x<0.5) y=(y-16.0/255.0)*255.0/219.0;
   float gain=flags.x<0.5?255.0/224.0:1;
   float3 k=flags.y>0.5?float3(1.402,0.344136,0.714136):float3(1.5748,0.187324,0.468124);
@@ -13,9 +13,9 @@ float3 color(float2 uv) {
  return saturate(c);
 }
 float luma(float3 rgb) { return dot(rgb, float3(.2126,.7152,.0722)); }
-float edgeLuma(float2 uv) {
+float edgeLuma(float2 uv, bool nv12) {
  float3 sampleColor=image.Sample(linearClamp,uv).rgb;
- return p.w>.5 ? sampleColor.r : luma(sampleColor);
+ return nv12 ? sampleColor.r : luma(sampleColor);
 }
 #ifdef AI_RESAMPLING
 // Split a pixel's footprint at the nearest texel boundary. Each side covers
@@ -83,36 +83,47 @@ float3 filterAi(float2 uv, float3 center) {
  float correction = (filtered - dot(neighbors, .25)) * strength;
  return saturate(center + clamp(correction, min(0, low - filtered), max(0, high - filtered)));
 }
-#endif
-
-float4 Preview(float4 pos:SV_POSITION,float2 uv:TEXCOORD):SV_TARGET {
-#ifdef AI_RESAMPLING
- float3 aiColor = aiFootprint.x > 0 ? resampleAi(uv) : aiTap(uv);
- [branch] if (flags.z > 0 || p.z > .001) aiColor = filterAi(uv, aiColor);
- return float4(aiColor, 1);
 #else
- float3 c=color(uv);
+float3 filterPreview(float2 uv, bool nv12) {
+ float3 c=color(uv,nv12);
  float edgeBlend=0;
  [branch] if(flags.z>0) {
   float2 d=flags.zw;
-  float nw=edgeLuma(uv-d), se=edgeLuma(uv+d);
-  float ne=edgeLuma(uv+float2(d.x,-d.y)), sw=edgeLuma(uv+float2(-d.x,d.y));
+  float nw=edgeLuma(uv-d,nv12), se=edgeLuma(uv+d,nv12);
+  float ne=edgeLuma(uv+float2(d.x,-d.y),nv12), sw=edgeLuma(uv+float2(-d.x,d.y),nv12);
   float lo=min(min(nw,ne),min(sw,se)), hi=max(max(nw,ne),max(sw,se));
   float2 gradient=float2(ne+se-nw-sw,sw+se-nw-ne);
   float diagonal=min(abs(gradient.x),abs(gradient.y));
   // Follow diagonal edges and preserve flat areas and clean straight lines.
   [branch] if(hi-lo>max(.075,hi*.15) && diagonal>.035) {
    float2 tangent=float2(-gradient.y,gradient.x)/max(abs(gradient.x),abs(gradient.y));
-   float3 along=(color(uv+tangent*d)+color(uv-tangent*d))*.5;
+   float3 along=(color(uv+tangent*d,nv12)+color(uv-tangent*d,nv12))*.5;
    edgeBlend=.65*smoothstep(.035,.16,diagonal);
    c=lerp(c,along,edgeBlend);
   }
  }
  if(p.z>0.001) {
   float2 d=1/p.xy;
-  float3 n=color(uv+float2(0,-d.y)),s=color(uv+float2(0,d.y)),e=color(uv+float2(d.x,0)),w=color(uv+float2(-d.x,0));
+  float3 n=color(uv+float2(0,-d.y),nv12),s=color(uv+float2(0,d.y),nv12);
+  float3 e=color(uv+float2(d.x,0),nv12),w=color(uv+float2(-d.x,0),nv12);
   c=clamp(c+(c-(n+s+e+w)*.25)*p.z*(1-edgeBlend),min(c,min(min(n,s),min(e,w))),max(c,max(max(n,s),max(e,w))));
  }
- return float4(c,1);
+ return c;
+}
+#endif
+
+float4 Preview(float4 pos:SV_POSITION,float2 uv:TEXCOORD):SV_TARGET {
+#ifdef AI_RESAMPLING
+ float3 aiColor;
+ [branch] if (aiFootprint.x > 0) aiColor = resampleAi(uv);
+ else aiColor = aiTap(uv);
+ [branch] if (flags.z > 0 || p.z > .001) aiColor = filterAi(uv, aiColor);
+ return float4(aiColor, 1);
+#else
+ // Plain draws also serve the RGB conversion used by motion analysis.
+ [branch] if (flags.z <= 0 && p.z <= .001) return float4(color(uv, p.w > .5), 1);
+ // Choose the source layout once, outside the color and edge sampling taps.
+ [branch] if (p.w > .5) return float4(filterPreview(uv, true), 1);
+ return float4(filterPreview(uv, false), 1);
 #endif
 }

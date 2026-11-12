@@ -14,7 +14,7 @@
     <RootNamespace>XenoCapture</RootNamespace>
     <PlatformTarget>x64</PlatformTarget>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>0.10.18</Version>
+    <Version>0.10.19</Version>
     <MinimumRuntimePatch>10.0.15</MinimumRuntimePatch>
     <Description>Native capture-card preview, upscaling and recording.</Description>
   </PropertyGroup>
