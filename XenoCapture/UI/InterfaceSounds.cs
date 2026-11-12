@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 
 namespace XenoCapture.UI;
 
-internal enum InterfaceCue { Tap, Connected, Disconnected }
+internal enum InterfaceCue { Tap, Connected, Disconnected, FullscreenExit }
 
 internal sealed class InterfaceSounds
 {
@@ -24,6 +24,9 @@ internal sealed class InterfaceSounds
         new Note(1047, 1047, .082, .125, .095)));
     static readonly Lazy<byte[]> disconnected = new(() => BuildWave(
         new Note(698, 650, 0, .093, .135), new Note(494, 440, .038, .122, .13)));
+
+    static readonly Lazy<byte[]> fullscreenExit = new(() => BuildWave(
+        new Note(740, 660, 0, .072, .105), new Note(523, 470, .032, .09, .095)));
 
     internal void Play(InterfaceCue cue)
     {
@@ -63,6 +66,7 @@ internal sealed class InterfaceSounds
     {
         InterfaceCue.Connected => connected.Value,
         InterfaceCue.Disconnected => disconnected.Value,
+        InterfaceCue.FullscreenExit => fullscreenExit.Value,
         _ => tap.Value
     };
 

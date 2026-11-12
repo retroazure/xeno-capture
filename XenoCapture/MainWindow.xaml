@@ -61,7 +61,7 @@
               <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
                 <Button x:Name="SnapshotButton" Content="Snapshot" IsEnabled="False" ToolTip="Save a PNG snapshot"
                         Click="Snapshot" Padding="10,5" Margin="0,0,6,0"/>
-                <Button x:Name="FullscreenButton" Content="Fullscreen ⛶" IsEnabled="False" ToolTip="Fullscreen preview (F11)"
+                <Button x:Name="FullscreenButton" Content="Fullscreen ⛶" IsEnabled="False" ToolTip="Fullscreen preview (F11). Hover the top-right corner to exit."
                         Click="Fullscreen" Padding="10,5"/>
               </StackPanel>
             </Grid>

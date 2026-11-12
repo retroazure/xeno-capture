@@ -80,13 +80,27 @@ public partial class MainWindow
     async void Fullscreen(object sender, RoutedEventArgs e) => await RunUi(ToggleFullscreen);
     Task ToggleFullscreen() => ToggleFullscreenOnDisplay(discoverHardware ? ResolveFullscreenBounds : null);
 
+    void SetFullscreenWindow(PreviewWindow? window)
+    {
+        fullscreen = window;
+        FullscreenButton.Content = window == null ? "Fullscreen ⛶" : "Exit fullscreen";
+        FullscreenButton.ToolTip = window == null
+            ? "Fullscreen preview (F11). Hover the top-right corner to exit."
+            : "Return the preview to this window";
+    }
+
     async Task ToggleFullscreenOnDisplay(Func<System.Drawing.Rectangle>? displayBounds)
     {
         if (fullscreenTransition) return;
         fullscreenTransition = true;
         try
         {
-            if (fullscreen != null) { await fullscreen.CloseAsync(animate: MotionEnabled); return; }
+            if (fullscreen != null)
+            {
+                PlayCue(InterfaceCue.FullscreenExit);
+                await fullscreen.CloseAsync(animate: MotionEnabled);
+                return;
+            }
             if (!Connected || !sessions.Active || closing || Interlocked.Read(ref lastFrameAt) == 0) return;
             PlayCue(InterfaceCue.Tap);
             int session = sessions.Generation;
@@ -125,13 +139,14 @@ public partial class MainWindow
                 finally { embedded.FramePresented -= Presented; }
             }
 
-            var playWindow = new PreviewWindow(host, animateEntry, displayBounds, () => MotionEnabled, EmbeddedPreviewBounds, ResumeAtLanding)
+            var playWindow = new PreviewWindow(host, animateEntry, displayBounds, () => MotionEnabled, EmbeddedPreviewBounds, ResumeAtLanding,
+                preview => PostUi(() => ReferenceEquals(fullscreen, preview) ? ToggleFullscreen() : Task.CompletedTask))
             {
                 Title = "Xeno Capture — Fullscreen", Background = Brushes.Black, WindowStyle = WindowStyle.None,
                 ResizeMode = ResizeMode.NoResize, Width = 640, Height = 360, ShowActivated = discoverHardware,
                 ShowInTaskbar = false, Owner = this
             };
-            fullscreen = playWindow;
+            SetFullscreenWindow(playWindow);
             playWindow.PreviewKeyDown += async (_, e) =>
             {
                 if (e.Key is Key.Escape or Key.F11) { e.Handled = true; await RunUi(ToggleFullscreen); }
@@ -139,7 +154,8 @@ public partial class MainWindow
             playWindow.Closed += (_, _) =>
             {
                 if (!ReferenceEquals(fullscreen, playWindow)) return;
-                fullscreenPreview = null; fullscreen = null;
+                fullscreenPreview = null;
+                SetFullscreenWindow(null);
                 ResumeEmbedded();
             };
             try { playWindow.Show(); lock (frameGate) { if (latest != null) host.Submit(latest); } }
@@ -150,7 +166,8 @@ public partial class MainWindow
                 {
                     if (ReferenceEquals(fullscreen, playWindow))
                     {
-                        fullscreen = null; fullscreenPreview = null;
+                        SetFullscreenWindow(null);
+                        fullscreenPreview = null;
                         await host.StopAsync();
                         host.Dispose();
                         ResumeEmbedded();

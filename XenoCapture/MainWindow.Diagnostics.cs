@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Runtime.InteropServices;
 
 using System.Windows.Interop;
 using System.Threading.Tasks;
@@ -12,6 +13,10 @@ namespace XenoCapture;
 // discovery and preference writes are disabled by the diagnostic constructor.
 public partial class MainWindow
 {
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [DllImport("user32.dll", EntryPoint = "SendMessageW", ExactSpelling = true)]
+    static extern nint SendDiagnosticWindowMessage(nint hwnd, int message, nint wParam, nint lParam);
+
     internal Exception? DiagnosticPreviewError {get;private set;}
     internal bool DiagnosticDisablePreviewWarmup { get; set; }
     readonly TaskCompletionSource diagnosticClosed = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -198,12 +203,15 @@ public partial class MainWindow
             await main.DiagnosticDisconnect();
 
             await CheckFullscreenDisplays();
-            var animated = await CheckFullscreenEntry(true);
+            var animated = await CheckFullscreenEntry(true, exit: ExitWithHover);
             var appDisplay = System.Windows.Forms.Screen.FromHandle(new WindowInteropHelper(main).Handle);
             var secondDisplay = System.Windows.Forms.Screen.AllScreens.FirstOrDefault(screen => screen.DeviceName != appDisplay.DeviceName);
-            var crossDisplay = secondDisplay == null ? (int?)null : (await CheckFullscreenEntry(true, secondDisplay.Bounds)).ExitRegionUpdates;
+            var crossDisplay = secondDisplay == null ? (int?)null : (await CheckFullscreenEntry(true, secondDisplay.Bounds, exit: ExitWithHover)).ExitRegionUpdates;
             var interrupted = await CheckFullscreenEntry(true, interruptEntry: true);
-            var reducedMotion = await CheckFullscreenEntry(false);
+            await CheckFullscreenEntry(false,
+                exit: _ => SendDiagnosticWindowMessage(main.fullscreenPreview!.Handle, 0x0100, 122, 0));
+            var reducedMotion = await CheckFullscreenEntry(false, secondDisplay?.Bounds,
+                exit: _ => main.FullscreenButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent)));
             await Task.Run(PreviewDiagnostics.Run);
             var entry = new { animationEnabledByWindows = SystemParameters.ClientAreaAnimation,
                 animatedFrames = animated.Frames, animatedRegionUpdates = animated.WindowRegionUpdates,
@@ -275,8 +283,42 @@ public partial class MainWindow
             main.RefreshFullscreenDisplays();
         }
 
+        void ExitWithHover(UI.PreviewWindow window)
+        {
+            var host = main.fullscreenPreview!;
+            var dpi = VisualTreeHelper.GetDpi(host);
+            int width = (int)Math.Round(host.ActualWidth * dpi.DpiScaleX);
+            int height = (int)Math.Round(host.ActualHeight * dpi.DpiScaleY);
+            var screenCorner = host.PointToScreen(new Point(host.ActualWidth - 3, 3));
+            nint screenPosition = (nint)(((int)screenCorner.Y << 16) | ((int)screenCorner.X & 0xFFFF));
+            Require(SendDiagnosticWindowMessage(host.Handle, 0x0084, 0, screenPosition) == 1,
+                "The fullscreen video host rejected native pointer hit testing.");
+            void Move(int x, int y) => SendDiagnosticWindowMessage(host.Handle, 0x0200, 0, (nint)((y << 16) | x));
+
+            Move(width / 2, height / 2);
+            Require(window.DiagnosticExitButton == null, "The fullscreen exit control was visible outside the corner.");
+            bool previewWasActive = window.IsActive, mainWasActive = main.IsActive;
+            Move(width - 3, 3);
+            Require(window.DiagnosticExitButton != null, "The fullscreen exit control did not reveal on native hover.");
+            Require(window.IsActive == previewWasActive && main.IsActive == mainWasActive, "The hover control changed window focus.");
+            Move(width / 2, height / 2);
+            Require(window.DiagnosticExitButton == null, "The fullscreen exit control stayed visible outside the corner.");
+            Move(width - 3, 3);
+            var button = window.DiagnosticExitButton!;
+            button.UpdateLayout();
+            var buttonTopLeft = button.PointToScreen(new Point());
+            var buttonBottomRight = button.PointToScreen(new Point(button.ActualWidth, button.ActualHeight));
+            var bounds = System.Windows.Forms.Screen.FromHandle(host.Handle).Bounds;
+            Require(button.ActualWidth > 0 && button.ActualHeight > 0 && buttonTopLeft.X > bounds.Right - 200 * dpi.DpiScaleX
+                && buttonTopLeft.Y >= bounds.Top && buttonBottomRight.X <= bounds.Right
+                && buttonBottomRight.Y <= bounds.Top + 80 * dpi.DpiScaleY,
+                "The hover control did not stay in the selected display's top-right corner.");
+            button.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            Require(window.DiagnosticExitButton == null, "The exit control stayed visible after it was clicked.");
+        }
+
         async Task<(int Frames, int WindowRegionUpdates, int ExitRegionUpdates)> CheckFullscreenEntry(bool motion,
-            System.Drawing.Rectangle? display = null, bool interruptEntry = false)
+            System.Drawing.Rectangle? display = null, bool interruptEntry = false, Action<UI.PreviewWindow>? exit = null)
         {
             sources.Enqueue(new TestCaptureBackend { Produce = true, OneFrame = true });
             main.MotionToggle.IsChecked = motion;
@@ -314,15 +356,21 @@ public partial class MainWindow
                 if (window.HoldsLandingSurface) System.Threading.Interlocked.Exchange(ref coveredPresent, 1);
             };
             window.Closed += (_, _) => closed.TrySetResult();
-            var escape = new System.Windows.Input.KeyEventArgs(System.Windows.Input.Keyboard.PrimaryDevice,
-                PresentationSource.FromVisual(window), 0, System.Windows.Input.Key.Escape)
-                { RoutedEvent = System.Windows.Input.Keyboard.PreviewKeyDownEvent };
-            window.RaiseEvent(escape);
-            Require(escape.Handled, "The fullscreen window did not handle Esc.");
+            Require(Equals(main.FullscreenButton.Content, "Exit fullscreen"), "The main window did not offer an exit action.");
+            if (exit != null) exit(window);
+            else
+            {
+                var escape = new System.Windows.Input.KeyEventArgs(System.Windows.Input.Keyboard.PrimaryDevice,
+                    PresentationSource.FromVisual(window), 0, System.Windows.Input.Key.Escape)
+                    { RoutedEvent = System.Windows.Input.Keyboard.PreviewKeyDownEvent };
+                window.RaiseEvent(escape);
+                Require(escape.Handled, "The fullscreen window did not handle Esc.");
+            }
             await closed.Task.WaitAsync(TimeSpan.FromSeconds(4));
             int exitUpdates = window.EntryRegionUpdates - updates;
             Require(main.fullscreen == null && (main.MotionEnabled ? exitUpdates > 3 : exitUpdates == 0),
-                "Esc did not reverse the fullscreen motion or respect reduced motion.");
+                "Fullscreen exit did not reverse the motion or respect reduced motion.");
+            Require(Equals(main.FullscreenButton.Content, "Fullscreen ⛶"), "The main window did not restore the fullscreen action.");
             if (main.MotionEnabled)
             {
                 Require(window.FirstDockBounds is { } start && start.Size != target!.Value.Size && window.LandingBounds == target,

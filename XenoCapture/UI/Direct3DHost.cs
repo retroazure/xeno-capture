@@ -176,7 +176,9 @@ internal sealed class Direct3DHost : HwndHost
         lock (gate)
         {
             if (stopping) throw new ObjectDisposedException(nameof(Direct3DHost));
-            nint window = CreateWindowEx(0, "static", "Xeno Direct3D Preview", 0x56010000, 0, 0, 1, 1, parent.Handle, 0, 0, 0);
+            const uint previewStyle = 0x56010000, notifyMouse = 0x100; // SS_NOTIFY enables hit testing on STATIC.
+            uint style = isFullscreen ? previewStyle | notifyMouse : previewStyle;
+            nint window = CreateWindowEx(0, "static", "Xeno Direct3D Preview", style, 0, 0, 1, 1, parent.Handle, 0, 0, 0);
             if (window == 0) throw new System.ComponentModel.Win32Exception();
             Volatile.Write(ref viewportChangedAt, Clock.Now);
             renderer = new Thread(() => Run(window)) { IsBackground = true, Name = "Xeno Direct3D video", Priority = ThreadPriority.AboveNormal }; renderer.Start();

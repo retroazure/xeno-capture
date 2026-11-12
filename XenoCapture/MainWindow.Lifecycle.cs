@@ -64,7 +64,8 @@ public partial class MainWindow
         try { if (fullscreen != null) await fullscreen.CloseAsync(animate: false); } catch (Exception ex) { errors.Add(ex); }
         try { await embeddedStopped; embeddedPreview.Dispose(); } catch (Exception ex) { errors.Add(ex); }
         try { await previewRenderer.ReleaseAsync(); } catch (Exception ex) { errors.Add(ex); }
-        fullscreen = null; fullscreenPreview = null; VideoHost.Visibility = Visibility.Collapsed;
+        if (fullscreen != null) SetFullscreenWindow(null);
+        fullscreenPreview = null; VideoHost.Visibility = Visibility.Collapsed;
         try { await inputsAndRecording; } catch (Exception ex) { errors.Add(ex); }
         if (!closing)
         {

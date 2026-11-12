@@ -10,7 +10,8 @@ Close the older running copy, then open XenoCapture.exe.
 Keep the gpu folder beside the executable.
 Click Play to start in the embedded preview.
 Choose a monitor under Output > Fullscreen display, then press Fullscreen or F11.
-Esc or F11 animates the fullscreen image into the embedded preview.
+Hover the top-right corner of fullscreen and click Exit fullscreen, or press Esc or F11.
+If the main window is on another monitor, click Exit fullscreen there.
 Smooth jagged edges in fullscreen is on by default under Output.
 Use Feedback in the top bar to control animations, including the fullscreen pop, and interface sounds.
 New recordings use the Xeno Capture folder in place of the old default folder.

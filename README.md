@@ -16,7 +16,7 @@ See the [Quick Start](QUICK%20START.txt) for setup and the [license section](#li
 
 Use the appearance button in the top bar to switch between light and dark mode. Xeno Capture saves the selection with its other preferences. On first launch it imports settings from the previous app name when a Xeno settings file is absent.
 
-Use **Feedback** in the top bar to control interface sounds and animations. Both are on by default. Motion follows the Windows animation setting. Entering fullscreen expands the rounded window with a soft rebound. Esc and F11 guide the last prepared image into the embedded preview, including when fullscreen uses another monitor. Interface sounds are paused during recording. A saved default recording folder with the previous app name moves to Xeno Capture under the same parent.
+Use **Feedback** in the top bar to control interface sounds and animations. Both are on by default. Motion follows the Windows animation setting. Entering fullscreen expands the rounded window with a soft rebound. Hover the top-right corner to reveal **Exit fullscreen**. The button, Esc and F11 guide the image into the embedded preview, including when fullscreen uses another monitor. Interface sounds are paused during recording. A saved default recording folder with the previous app name moves to Xeno Capture under the same parent.
 
 ## Experimental AI preview upscaling
 
@@ -55,7 +55,7 @@ Frame generation adapts its scheduling margin to the measured GPU work and skips
 3. Open **XenoCapture.exe**. Select your capture card and a **1920 × 1080 / 60 fps** format.
 4. Select the capture card's HDMI audio input. A matching device is selected automatically when Windows reports the same name. Choose another input manually if needed.
 5. Click **Play** to start in the embedded preview. Choose **Output → Fullscreen display** to use a specific monitor, then press **Fullscreen** or **F11**. If the saved display is unavailable, the preview opens on the app's display. Matching capture-card audio plays through the PC's default output automatically. **Listen on this PC** controls this manually.
-6. Press **Esc** or **F11** to return to the controls. **Disconnect** releases the inputs. Keep your controller connected to the Switch 2.
+6. Hover the top-right corner and click **Exit fullscreen**, or press **Esc** or **F11**. You can also click **Exit fullscreen** in the main window when it is on another monitor. **Disconnect** releases the inputs. Keep your controller connected to the Switch 2.
 
 Start with a 1080p60 SDR signal and stereo audio from the console. On Switch 2, TV resolution, HDR and 120 Hz output are controlled under System Settings → Display. Use a wired headphone/speaker output if responsiveness matters; Bluetooth introduces its own audio delay.
 

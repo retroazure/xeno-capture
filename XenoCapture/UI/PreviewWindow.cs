@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Threading;
 
@@ -20,6 +21,8 @@ internal sealed class PreviewWindow : Window
     readonly Func<Task, Task>? resumeAtLanding;
     readonly TaskCompletionSource skipLandingWait = new(TaskCreationOptions.RunContinuationsAsynchronously);
     FullscreenWindowPop? windowPop;
+    readonly FullscreenExitControl? exitControl;
+    internal Button? DiagnosticExitButton => exitControl?.VisibleButton;
     HwndSource? source;
     internal bool EntryRegionActive => windowPop?.RegionActive == true;
     internal int EntryRegionUpdates => windowPop?.RegionUpdates ?? 0;
@@ -31,7 +34,8 @@ internal sealed class PreviewWindow : Window
     Exception? closeError;
 
     public PreviewWindow(Direct3DHost host, bool animateEntry = false, Func<Rectangle>? displayBounds = null,
-        Func<bool>? motionEnabled = null, Func<Rectangle?>? dockTarget = null, Func<Task, Task>? resumeAtLanding = null)
+        Func<bool>? motionEnabled = null, Func<Rectangle?>? dockTarget = null, Func<Task, Task>? resumeAtLanding = null,
+        Action<PreviewWindow>? exitFullscreen = null)
     {
         this.host = host;
         this.animateEntry = animateEntry;
@@ -40,6 +44,7 @@ internal sealed class PreviewWindow : Window
         this.dockTarget = dockTarget;
         this.resumeAtLanding = resumeAtLanding;
         Content = host;
+        if (exitFullscreen != null) exitControl = new(this, host, () => exitFullscreen(this));
         if (displayBounds != null) Loaded += (_, _) => FitDisplay();
     }
 
@@ -59,6 +64,7 @@ internal sealed class PreviewWindow : Window
     void FitDisplay()
     {
         if (stopping || displayBounds == null || source == null || source.IsDisposed) return;
+        exitControl?.Hide();
         var bounds = displayBounds();
         if (!PositionWindow(source.Handle, bounds)) throw new Win32Exception(Marshal.GetLastWin32Error());
         host.SetFullscreenViewportSize(bounds.Width, bounds.Height);
@@ -96,6 +102,7 @@ internal sealed class PreviewWindow : Window
         e.Cancel = true;
         if (stopping) return;
         stopping = true;
+        exitControl?.Dispose();
         await Dispatcher.Yield(DispatcherPriority.Background);
         bool landed = false;
         try
@@ -116,6 +123,7 @@ internal sealed class PreviewWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        if (!stopping) exitControl?.Dispose();
         windowPop?.Stop(clear: false);
         try { host.Dispose(); } catch (Exception ex) { closeError ??= ex; }
         finally { windowPop?.ReleaseLandingSurface(); }
