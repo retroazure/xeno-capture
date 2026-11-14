@@ -302,53 +302,45 @@ internal static class PresentationStressDiagnostics
                 throw new InvalidOperationException("Steady pacing rejected a matching refresh rate.");
             FullscreenSourceCadence cadence = default;
             long previousDue = 0, maxDeviation = 0, maxHold = 0;
-            long holdLimit = Math.Min(60_000, (long)(10_000_000 / hz));
+            long holdLimit = FullscreenSourceCadence.MaximumHold(hz);
             for (int i = 0; i < 240; i++)
             {
                 long time = baseTime + i * period;
                 long arrival = time + lag + (i % 2) * jitter;
-                long due = cadence.Deadline(time, period, arrival, hz, out _);
+                long due = cadence.Deadline(time, period, arrival, hz);
                 if (due < arrival || due > arrival + holdLimit)
                     throw new InvalidOperationException("Steady pacing exceeded its hold limit.");
                 if (i > 60) maxDeviation = Math.Max(maxDeviation, Math.Abs(due - previousDue - period));
                 maxHold = Math.Max(maxHold, due - arrival);
                 previousDue = due;
             }
-            if (maxDeviation > 8_000)
+            if (maxDeviation > 3_000)
                 throw new InvalidOperationException("Steady pacing did not smooth alternating input jitter.");
             long missedFrame = baseTime + 241 * period;
-            if (cadence.Deadline(missedFrame, period, missedFrame + lag, hz, out long steadySubmitBy) != missedFrame + lag || steadySubmitBy > missedFrame + lag)
+            if (cadence.Deadline(missedFrame, period, missedFrame + lag, hz) != missedFrame + lag)
                 throw new InvalidOperationException("Steady pacing held a frame after a dropped input.");
+
+            cadence = default;
+            for (int i = 0; i < 60; i++)
+            {
+                long time = baseTime + i * period;
+                if (cadence.Deadline(time, period, time + lag, hz) != time + lag)
+                    throw new InvalidOperationException("Steady pacing delayed an on-time capture.");
+            }
+
             const long delay = 120_000;
-            FullscreenSourceCadence lateDelivery = default;
-            lateDelivery.Deadline(baseTime, period, baseTime + lag, hz, out _);
-            long late = baseTime + period + lag + delay;
-            if (lateDelivery.Deadline(baseTime + period, period, late, hz, out steadySubmitBy) != late || steadySubmitBy > late)
-                throw new InvalidOperationException("A late source frame should be shown immediately.");
-            long resumed = baseTime + 2 * period + lag;
-            long resumedDue = lateDelivery.Deadline(baseTime + 2 * period, period, resumed, hz, out steadySubmitBy);
-            if (steadySubmitBy <= resumedDue || resumedDue <= resumed || resumedDue > resumed + holdLimit)
-                throw new InvalidOperationException("A single late frame disrupted the next on-time frame.");
+            long late = baseTime + 60 * period + lag + delay;
+            if (cadence.Deadline(baseTime + 60 * period, period, late, hz) != late)
+                throw new InvalidOperationException("Steady pacing delayed a late capture.");
+            long resumed = baseTime + 61 * period + lag;
+            if (cadence.Deadline(baseTime + 61 * period, period, resumed, hz) != resumed)
+                throw new InvalidOperationException("A single late frame delayed the next on-time capture.");
 
-            // A permanent delivery shift must still establish a new clock.
-            lateDelivery = default;
-            lateDelivery.Deadline(baseTime, period, baseTime + lag, hz, out _);
-            lateDelivery.Deadline(baseTime + period, period, late, hz, out _);
-            lateDelivery.Deadline(baseTime + 2 * period, period, late + period, hz, out steadySubmitBy);
-            if (steadySubmitBy > late + period) throw new InvalidOperationException("Steady pacing did not catch up to a changed delivery phase.");
-            lateDelivery.Deadline(baseTime + 3 * period, period, late + 2 * period, hz, out steadySubmitBy);
-            if (steadySubmitBy <= late + 2 * period) throw new InvalidOperationException("Steady pacing did not settle on the new delivery phase.");
-
-            // This delivery is late enough to consume the draw budget, but still
-            // close enough to follow the existing capture phase.
-            lateDelivery = default;
-            lateDelivery.Deadline(baseTime, period, baseTime + lag, hz, out _);
-            long refreshPeriod = (long)(10_000_000 / hz);
-            long lateArrival = baseTime + period + lag + Math.Min(period / 2 - 1, refreshPeriod * 4 / 3);
-            long release = lateDelivery.Deadline(baseTime + period, period, lateArrival, hz, out steadySubmitBy);
-            long submittedAt = lateArrival + holdLimit * 4 / 5;
-            if (release != lateArrival || steadySubmitBy <= lateArrival || submittedAt < steadySubmitBy || submittedAt >= release + refreshPeriod)
-                throw new InvalidOperationException("Late delivery and drawing did not share the same refresh budget.");
+            long shifted = resumed + period + delay;
+            if (cadence.Deadline(baseTime + 62 * period, period, shifted, hz) != shifted
+                || cadence.Deadline(baseTime + 63 * period, period, shifted + period, hz) != shifted + period
+                || cadence.Deadline(baseTime + 64 * period, period, shifted + 2 * period, hz) != shifted + 2 * period)
+                throw new InvalidOperationException("Steady pacing did not catch up to a changed delivery phase.");
             cases.Add(new { hz, maximumScheduledGapErrorMs = maxDeviation / 10000.0, maximumHoldMs = maxHold / 10000.0 });
         }
         return cases;
@@ -357,7 +349,9 @@ internal static class PresentationStressDiagnostics
     static async Task<Dictionary<string, object>> RunNativePlayback(bool aiMotion = false, bool steadyOnly = false)
     {
         const long period = 166667, arrivalJitter = 30_000;
-        bool steadyAi = steadyOnly && Array.IndexOf(Environment.GetCommandLineArgs(), "--steady-pacing-ai") >= 0;
+        var args = Environment.GetCommandLineArgs();
+        bool steadyUltra = steadyOnly && Array.IndexOf(args, "--steady-pacing-ai-ultra") >= 0;
+        bool steadyAi = steadyUltra || (steadyOnly && Array.IndexOf(args, "--steady-pacing-ai") >= 0);
         var source = new PacedVideoBackend(1920, 1080, arrivalJitter, pan: aiMotion || steadyOnly);
         var main = new MainWindow(false, false, (_, _) => new CaptureStream(() => source, TimeSpan.FromSeconds(2)))
             { ShowActivated = false };
@@ -462,7 +456,7 @@ internal static class PresentationStressDiagnostics
             if (steadyOnly)
             {
                 await WaitFor(() => main.DiagnosticHasFrame);
-                if (steadyAi) main.DiagnosticSelectAiVideo(true, 1440, 3);
+                if (steadyAi) main.DiagnosticSelectAiVideo(true, steadyUltra ? 2160 : 1440, steadyUltra ? 4 : 3);
                 var displays = new List<object>();
                 foreach (var screen in System.Windows.Forms.Screen.AllScreens)
                 {
@@ -480,8 +474,8 @@ internal static class PresentationStressDiagnostics
                     if (!host.SteadyFullscreenPacing || main.DiagnosticEmbedded.SteadyFullscreenPacing)
                         throw new InvalidOperationException("The saved cadence preference did not apply only to the fullscreen host.");
                     var steady = await Sample(host);
-                    if (steady["sourcePacingWaits"] == 0)
-                        throw new InvalidOperationException("Steady cadence never scheduled a display hold.");
+                    if (steadyAi && !host.AiVideoActive)
+                        throw new InvalidOperationException("AI video became unavailable during steady cadence.");
 
                     main.DiagnosticSetSteadyFullscreenPacing(false);
                     var ordinaryRepeat = await Sample(host);

@@ -200,7 +200,7 @@
                   <CheckBox x:Name="SteadyFullscreenPacingToggle" Content="Steady fullscreen cadence" Margin="0,9,0,0"
                             Checked="SteadyFullscreenPacingChanged" Unchecked="SteadyFullscreenPacingChanged"
                             IsEnabled="{Binding IsChecked, ElementName=SourcePacingToggle}"
-                            ToolTip="With frame generation off, space captured frames evenly on matching displays, such as 60 FPS on 180 Hz or 240 Hz. May hold early frames for up to one display refresh."/>
+                            ToolTip="With frame generation off, space captured frames evenly on matching displays, such as 60 FPS on 180 Hz or 240 Hz. May hold an early frame for up to 3 ms to absorb capture jitter."/>
                 </StackPanel>
               </Border>
               <TextBlock Text="Fullscreen display" Style="{StaticResource Label}" Margin="0,13,0,6"/>

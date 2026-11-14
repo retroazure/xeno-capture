@@ -71,9 +71,10 @@ internal struct FullscreenSourceCadence
         return whole is >= 2 and <= 4 && Math.Abs(refreshes - whole) <= .05 ? (uint)whole : 0;
     }
 
-    internal long Deadline(long time, long duration, long arrival, double refreshHz, out long steadySubmitBy)
-    {
+    internal static long MaximumHold(double refreshHz) => Math.Min(30_000, (long)(7_500_000 / refreshHz));
 
+    internal long Deadline(long time, long duration, long arrival, double refreshHz)
+    {
         long gap = time - previousTime;
         bool continuous = previousDuration != 0 && gap >= duration * 3 / 4 && gap <= duration * 5 / 4
             && Math.Abs(previousDuration - duration) <= duration / 32;
@@ -88,20 +89,14 @@ internal struct FullscreenSourceCadence
                 && error > duration / 2 && error <= duration;
             expectedArrival = isolatedDelay ? expectedArrival + duration : arrival;
             previousArrivalWasLate = isolatedDelay;
-            steadySubmitBy = arrival;
             return arrival;
         }
         previousArrivalWasLate = false;
 
-        // Follow slow drift between the capture and PC clocks. A short
-        // reserve absorbs delivery jitter while retaining the newest-frame slot.
-        expectedArrival += duration + error / 32;
-        long refreshPeriod = (long)(10_000_000 / refreshHz);
-        long holdLimit = Math.Min(60_000, refreshPeriod);
-        long scheduled = Math.Min(expectedArrival + holdLimit * 2 / 3, arrival + holdLimit);
-        // A late arrival consumes the same refresh budget as a late draw.
-        steadySubmitBy = scheduled + refreshPeriod;
-        return Math.Max(scheduled, arrival);
+        // Track the later edge of normal capture jitter without adding a fixed
+        // reserve to on-time frames. A late capture can always present immediately.
+        expectedArrival += duration + (error > 0 ? error : error / 32);
+        return arrival + Math.Clamp(expectedArrival - arrival, 0, MaximumHold(refreshHz));
     }
 }
 

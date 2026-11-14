@@ -55,12 +55,10 @@ internal sealed partial class Direct3DHost
 
             uint sourceInterval = prepareAhead && clockInterval != 0
                 ? FullscreenSourceCadence.RefreshInterval(frame.Duration, refreshHz) : 0;
-            long sourceDue = 0;
-            long steadySubmitBy = 0;
-            if (sourceInterval != 0)
-                sourceDue = steadyCadence.Deadline(frame.Time, frame.Duration, consumedArrival, refreshHz, out steadySubmitBy);
-            else if (prepareAhead)
-                sourceDue = SourcePacingDeadline(frame, consumedArrival, LastSourceDisplayTime(), prepareAhead: true);
+            bool useSteadyCadence = sourceInterval != 0;
+            long sourceDue = useSteadyCadence
+                ? steadyCadence.Deadline(frame.Time, frame.Duration, consumedArrival, refreshHz)
+                : prepareAhead ? SourcePacingDeadline(frame, consumedArrival, LastSourceDisplayTime(), prepareAhead: true) : 0;
 
             long featureCreations = Renderer.VsrFeatureCreations;
             if (!DrawSourceFrame(frame, prediction, predicting, !entryAnimating, ref predictionInterval)) return;
@@ -71,20 +69,32 @@ internal sealed partial class Direct3DHost
             // Refresh at most once after a long draw so bursts cannot starve presentation.
             using var fresh = RefreshAfterAiStartup(featureCreations, frame.Duration)
                 ?? (Clock.Now - consumedArrival >= Math.Max(50_000, frame.Duration) ? TakeLatestFrame() : null);
-            if (fresh != null) DrawSourceFrame(fresh, prediction, predicting, false, ref predictionInterval);
-            else WaitAfterSourceDraw(requested, sourceDue, sourceInterval);
+            if (fresh == null) WaitAfterSourceDraw(requested, sourceDue, useSteadyCadence);
+            using var replacement = fresh == null && useSteadyCadence ? TakeLatestFrame() : null;
+            var newest = fresh ?? replacement;
+            if (newest != null)
+            {
+                if (useSteadyCadence)
+                    steadyCadence.Deadline(newest.Time, newest.Duration, consumedArrival, refreshHz);
+                DrawSourceFrame(newest, prediction, predicting, false, ref predictionInterval);
+            }
             if (!IsActive()) return;
 
-            var shown = fresh ?? frame;
-            // A missed deadline should let the next capture catch up at the next refresh.
-            uint refreshInterval = sourceInterval != 0 && fresh == null && host.SteadyFullscreenPacing
-                && host.FrameGeneration == requested && Clock.Now < steadySubmitBy
-                ? sourceInterval : 1;
-            bool accepted = Present(new PresentedFrame(shown.Time, shown.Duration), refreshInterval: refreshInterval);
+            var shown = newest ?? frame;
+            // A slow inference, a changed presentation phase, or a replaced capture
+            // should leave the next refresh available to catch up.
+            long queuedAt = Clock.Now;
+            bool steadyPresent = useSteadyCadence && newest == null && host.SteadyFullscreenPacing
+                && host.FrameGeneration == requested
+                && Math.Abs(sourcePacing.Duration - frame.Duration) <= frame.Duration / 32
+                && Math.Abs(frame.Time - sourcePacing.Time - frame.Duration) <= frame.Duration / 4
+                && queuedAt - consumedArrival < 10_000_000 / refreshHz
+                && queuedAt - lastPresentedAt < frame.Duration + 10_000_000 / refreshHz;
+            bool accepted = Present(new PresentedFrame(shown.Time, shown.Duration),
+                refreshInterval: steadyPresent ? sourceInterval : 1);
             if (accepted && (requested == FrameGenerationMode.Off || prediction.RecoveringGaps))
             {
-                // Steady cadence tracks the capture clock without a DXGI present counter.
-                uint? presentCount = sourceInterval == 0 && host.isFullscreen && paceSource && !entryAnimating
+                uint? presentCount = !useSteadyCadence && host.isFullscreen && paceSource && !entryAnimating
                     && SourceFramePacing.HasRefreshHeadroom(refreshHz, shown.Duration) ? Renderer.LastPresentCount() : null;
                 sourcePacing = new(shown.Time, shown.Duration, consumedArrival, presentCount);
             }
@@ -188,15 +198,19 @@ internal sealed partial class Direct3DHost
             return true;
         }
 
-        void WaitAfterSourceDraw(FrameGenerationMode requested, long due, uint sourceInterval)
+        void WaitAfterSourceDraw(FrameGenerationMode requested, long due, bool steady)
         {
             if (due <= Clock.Now || !host.SmoothSourcePacing || host.FrameGeneration != requested || !IsActive()) return;
 
             // Start GPU work during the hold so it can finish before the present deadline.
             Renderer.SubmitPendingDraw();
             while (due > Clock.Now && host.SmoothSourcePacing && host.FrameGeneration == requested
-                && (sourceInterval == 0 || host.SteadyFullscreenPacing) && IsActive())
+                && (!steady || host.SteadyFullscreenPacing) && IsActive())
             {
+                if (steady)
+                {
+                    lock (host.gate) { if (host.latest != null) return; }
+                }
                 if (!WaitForSourceDeadline(due)) break;
             }
         }
