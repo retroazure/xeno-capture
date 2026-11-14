@@ -60,7 +60,9 @@ internal readonly record struct SourceFramePacing(long Time, long Duration, long
 
 internal struct FullscreenSourceCadence
 {
-    long previousTime, previousDuration, expectedArrival, lateArrival;
+    long previousTime, previousDuration, expectedArrival;
+    long pendingLatePhase;
+    int latePhaseAge;
 
     internal static uint RefreshInterval(long duration, double refreshHz)
     {
@@ -84,22 +86,24 @@ internal struct FullscreenSourceCadence
         if (!continuous || error < -duration / 2 || error > duration)
         {
             expectedArrival = arrival;
-            lateArrival = 0;
+            latePhaseAge = 0;
             return arrival;
         }
 
         long hold = MaximumHold(refreshHz);
-        // An arrival outside the jitter budget presents immediately. Keep the
-        // previous phase until consecutive captures confirm the later timing.
-        if (error > hold + 7_500)
+        // Require two comparable late captures before shifting the phase.
+        // Allow one intervening on-time capture for alternating delivery jitter.
+        const long phaseTolerance = 10_000;
+        if (error > phaseTolerance)
         {
-            bool phaseShift = lateArrival != 0 && Math.Abs(arrival - lateArrival - duration) <= hold;
-            expectedArrival = phaseShift ? arrival : expected;
-            lateArrival = phaseShift ? 0 : arrival;
+            bool confirmed = latePhaseAge is 1 or 2 && Math.Abs(error - pendingLatePhase) <= phaseTolerance;
+            expectedArrival = confirmed ? arrival : expected;
+            pendingLatePhase = error;
+            latePhaseAge = confirmed ? 0 : 1;
             return arrival;
         }
 
-        lateArrival = 0;
+        latePhaseAge = latePhaseAge == 1 ? 2 : 0;
         // Track the later edge of normal jitter without adding a fixed reserve.
         expectedArrival = expected + (error > 0 ? error : error / 32);
         return arrival + Math.Clamp(expectedArrival - arrival, 0, hold);

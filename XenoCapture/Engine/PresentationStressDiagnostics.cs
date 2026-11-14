@@ -336,9 +336,8 @@ internal static class PresentationStressDiagnostics
             if (cadence.Deadline(baseTime + 61 * period, period, resumed, hz) != resumed)
                 throw new InvalidOperationException("A single late frame delayed the next on-time capture.");
 
-            // This spike is shorter than half a frame and used to shift the
-            // clock even though every following capture was back on time.
-            long spike = resumed + period + 75_000;
+            // A small spike must also leave the next on-time captures alone.
+            long spike = resumed + period + 25_000;
             if (cadence.Deadline(baseTime + 62 * period, period, spike, hz) != spike)
                 throw new InvalidOperationException("Steady pacing held an isolated delivery spike.");
             for (int i = 63; i < 70; i++)
@@ -364,7 +363,8 @@ internal static class PresentationStressDiagnostics
         var args = Environment.GetCommandLineArgs();
         bool steadyUltra = steadyOnly && Array.IndexOf(args, "--steady-pacing-ai-ultra") >= 0;
         bool steadyAi = steadyUltra || (steadyOnly && Array.IndexOf(args, "--steady-pacing-ai") >= 0);
-        long arrivalSpike = steadyOnly && Array.IndexOf(args, "--steady-pacing-spikes") >= 0 ? 95_000 : 0;
+        long arrivalSpike = steadyOnly && Array.IndexOf(args, "--steady-pacing-short-spikes") >= 0 ? 52_000
+            : steadyOnly && Array.IndexOf(args, "--steady-pacing-spikes") >= 0 ? 95_000 : 0;
         var source = new PacedVideoBackend(1920, 1080, arrivalJitter, pan: aiMotion || steadyOnly, arrivalSpike: arrivalSpike);
         var main = new MainWindow(false, false, (_, _) => new CaptureStream(() => source, TimeSpan.FromSeconds(2)))
             { ShowActivated = false };
@@ -477,6 +477,7 @@ internal static class PresentationStressDiagnostics
             {
                 await WaitFor(() => main.DiagnosticHasFrame);
                 if (steadyAi) main.DiagnosticSelectAiVideo(true, steadyUltra ? 2160 : 1440, steadyUltra ? 4 : 3);
+                bool steadyOnlySample = Array.IndexOf(args, "--steady-pacing-sample-only") >= 0;
                 var displays = new List<object>();
                 foreach (var screen in System.Windows.Forms.Screen.AllScreens)
                 {
@@ -485,7 +486,7 @@ internal static class PresentationStressDiagnostics
                     await main.DiagnosticFullscreenOnDisplay(screen.Bounds);
                     var host = main.DiagnosticPreview ?? throw new InvalidOperationException("No fullscreen host for steady pacing.");
                     if (steadyAi) await WaitFor(() => host.AiVideoActive);
-                    var ordinary = await Sample(host);
+                    var ordinary = steadyOnlySample ? null : await Sample(host);
 
                     main.DiagnosticSetSteadyFullscreenPacing(true);
                     string steadySettings = main.DiagnosticSettingsJson;
@@ -498,7 +499,7 @@ internal static class PresentationStressDiagnostics
                         throw new InvalidOperationException("AI video became unavailable during steady cadence.");
 
                     main.DiagnosticSetSteadyFullscreenPacing(false);
-                    var ordinaryRepeat = await Sample(host);
+                    var ordinaryRepeat = steadyOnlySample ? null : await Sample(host);
                     await main.DiagnosticWindowed();
                     displays.Add(new { hz, screen.Bounds.Width, screen.Bounds.Height, aiVideo = host.AiVideoStatus, ordinary, steady, ordinaryRepeat });
                 }
