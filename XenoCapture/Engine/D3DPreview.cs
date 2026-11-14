@@ -47,7 +47,7 @@ internal sealed unsafe partial class D3DPreview : IDisposable
     int width, height, inputWidth, inputHeight;
     PixelLayout layout; PreviewUpscaler previousUpscaler;
     readonly record struct ShaderParameters(float Width, float Height, float Sharpness, float Nv12, float FullRange, float Bt601, float EdgeStepX = 0, float EdgeStepY = 0,
-        float AiFootprintX = 0, float AiFootprintY = 0, float PaddingX = 0, float PaddingY = 0);
+        float AiFootprintX = 0, float AiFootprintY = 0, float AiReductionRatio = 0, float Padding = 0);
     ShaderParameters previousParameters;
     bool parametersValid;long sourceContentRevision,imageUploadRevision;
     static readonly Lazy<byte[]> VertexBytecode = new(() => ShaderBytecode("Preview.Vertex"));
@@ -61,6 +61,7 @@ internal sealed unsafe partial class D3DPreview : IDisposable
     PreparedOutput? fullscreenMotionOutput;
     internal bool EdgeSmoothing { get; set; }
     internal bool DiagnosticAiResampling { get; set; }
+    internal bool DiagnosticDisableFastAiReduction { get; set; }
     internal bool DiagnosticDisableProcessedCache { get; set; }
     internal bool RetainFullscreenOutput { get; set; }
     internal bool CanRedrawFullscreenMotion => fullscreenMotionOutput.HasValue;
@@ -423,7 +424,22 @@ internal sealed unsafe partial class D3DPreview : IDisposable
         {
             float footprintX = parameters.Width / viewport.Width, footprintY = parameters.Height / viewport.Height;
             if (footprintX > 1.10f || footprintY > 1.10f || footprintX < .85f || footprintY < .85f)
-                parameters = parameters with { AiFootprintX = footprintX, AiFootprintY = footprintY };
+            {
+                float alignedReduction = 0;
+                // These exact ratios cover at most two texels per axis when
+                // the viewport starts on a whole output pixel.
+                if (!DiagnosticDisableFastAiReduction && !docking && !transitioning
+                    && footprintX == footprintY && footprintX is 1.5f or 2f
+                    && viewport.X == MathF.Truncate(viewport.X) && viewport.Y == MathF.Truncate(viewport.Y)
+                    && viewport.Width * footprintX == parameters.Width && viewport.Height * footprintY == parameters.Height)
+                    alignedReduction = footprintX;
+                parameters = parameters with
+                {
+                    AiFootprintX = footprintX,
+                    AiFootprintY = footprintY,
+                    AiReductionRatio = alignedReduction
+                };
+            }
         }
         bool aiFilters = output.AiResampling && (parameters.EdgeStepX > 0 || parameters.Sharpness > .001f);
         SetPreviewPixelShader(parameters.AiFootprintX > 0 || aiFilters);

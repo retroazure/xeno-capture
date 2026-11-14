@@ -10,6 +10,9 @@ internal static class RenderPerformanceDiagnostics
     public static Dictionary<string, object> Run()
     {
         using var apartment = new Apartment();
+        if (Array.IndexOf(Environment.GetCommandLineArgs(), "--ai-fit-benchmark") >= 0)
+            return new() { ["cases"] = CompareAiReduction(), ["result"] = "PASS" };
+
         var construction = new List<double>();
         for (int i = 0; i < 8; i++)
         {
@@ -64,6 +67,65 @@ internal static class RenderPerformanceDiagnostics
             ["batchTimingIncludesFinalGpuReadback"] = true, ["measuresMonitorPresentation"] = false,
             ["captureHardware"] = "not exercised", ["result"] = "PASS" };
     }
+    static object CompareAiReduction()
+    {
+        using var source = Pattern(3840, 2160, PixelLayout.Bgr32);
+        var cases = new List<object>();
+        foreach (int height in new[] { 1080, 1440 })
+        {
+            int width = height * 16 / 9;
+            using var renderer = new D3DPreview(0, width, height)
+                { RetainFullscreenOutput = true, DiagnosticAiResampling = true, EdgeSmoothing = true };
+            // Time the final fullscreen pass on an existing 4K surface.
+            // Alternating order reduces GPU clock and temperature bias.
+            var genericTimes = new List<double>();
+            var alignedTimes = new List<double>();
+            byte[] generic = Paint(disableFastPath: true);
+            byte[] aligned = Paint(disableFastPath: false);
+            int maximumDelta = 0;
+            long totalDelta = 0;
+            for (int i = 0; i < generic.Length; i++)
+            {
+                int delta = Math.Abs(generic[i] - aligned[i]);
+                maximumDelta = Math.Max(maximumDelta, delta);
+                totalDelta += delta;
+            }
+            if (maximumDelta > 1)
+                throw new InvalidOperationException($"Aligned {height}p reduction differs by up to {maximumDelta} channel levels.");
+
+            for (int batch = 0; batch < 8; batch++)
+            {
+                bool genericFirst = batch % 2 == 0;
+                Measure(genericFirst);
+                Measure(!genericFirst);
+            }
+            cases.Add(new
+            {
+                width, height, maximumDelta, meanDelta = totalDelta / (double)generic.Length,
+                genericMedianMs = genericTimes.Order().ElementAt(4),
+                alignedMedianMs = alignedTimes.Order().ElementAt(4)
+            });
+
+            byte[] Paint(bool disableFastPath)
+            {
+                renderer.DiagnosticDisableFastAiReduction = disableFastPath;
+                renderer.Draw(source, .35);
+                return renderer.Readback();
+            }
+
+            void Measure(bool disableFastPath)
+            {
+                renderer.DiagnosticDisableFastAiReduction = disableFastPath;
+                var timer = Stopwatch.StartNew();
+                const int frames = 120;
+                for (int i = 0; i < frames; i++) renderer.RedrawFullscreenMotion();
+                renderer.Readback();
+                (disableFastPath ? genericTimes : alignedTimes).Add(timer.Elapsed.TotalMilliseconds / frames);
+            }
+        }
+        return cases;
+    }
+
     static object ComparePreviewFilters()
     {
         var results = new List<object>();

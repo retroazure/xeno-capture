@@ -28,6 +28,7 @@ void areaAxis(float center,float width,out float2 samples,out float weight) {
 }
 float3 aiTap(float2 uv) { return image.SampleLevel(linearClamp,uv,0).rgb; }
 float3 resampleAi(float2 uv) {
+ // An aligned 2:1 footprint is the average of a 2x2 texel block.
  float2 footprint=aiFootprint.xy;
  float3 result=0;
  if (max(footprint.x,footprint.y)>3) {
@@ -115,8 +116,17 @@ float3 filterPreview(float2 uv, bool nv12) {
 float4 Preview(float4 pos:SV_POSITION,float2 uv:TEXCOORD):SV_TARGET {
 #ifdef AI_RESAMPLING
  float3 aiColor;
- [branch] if (aiFootprint.x > 0) aiColor = resampleAi(uv);
- else aiColor = aiTap(uv);
+ // An aligned 2:1 footprint is the average of a 2x2 texel block.
+ // At 3:2 the footprint alternates between 2:1 and 1:2 weights.
+ // Shift each axis by 1/12 of a texel to get those weights in one sample.
+ [branch] if (aiFootprint.z == 1.5) {
+  float2 center = uv * p.xy;
+  aiColor = aiTap((center + (step(.5, frac(center)) * 2 - 1) * (1.0 / 12.0)) / p.xy);
+ } else if (aiFootprint.z == 2 || aiFootprint.x <= 0) {
+  aiColor = aiTap(uv);
+ } else {
+  aiColor = resampleAi(uv);
+ }
  [branch] if (flags.z > 0 || p.z > .001) aiColor = filterAi(uv, aiColor);
  return float4(aiColor, 1);
 #else
