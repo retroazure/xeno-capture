@@ -9,12 +9,13 @@ using WinRT;
 
 namespace XenoCapture.Engine;
 
-internal sealed unsafe class WindowCaptureBackend(GraphicsCaptureItem item) : ICaptureBackend
+internal sealed unsafe class WindowCaptureBackend(GraphicsCaptureItem item, bool highFrameRate = false) : ICaptureBackend
 {
     const DirectXPixelFormat CaptureFormat = DirectXPixelFormat.B8G8R8A8UIntNormalized;
     const int BufferCount = 2;
     const int MaxPixels = 3840 * 2160;
     static readonly Guid CaptureItemId = new("79c3f95b-31f7-4ec2-a464-632ef5d30760");
+    static readonly Guid CaptureSession5Id = new("67c0ea62-1f85-5061-925a-239be0ac09cb");
     static readonly Guid DxgiDeviceId = new("54ec77fa-1377-44e6-8c32-88fd5f44c84c");
     static readonly Guid MultithreadId = new("9b7e4e00-342c-4106-a19f-4f2704f689f0");
     static readonly Guid SurfaceAccessId = new("a9b3d012-3df2-4ee3-b8d1-8695f457d3c1");
@@ -148,7 +149,22 @@ internal sealed unsafe class WindowCaptureBackend(GraphicsCaptureItem item) : IC
         pool.FrameArrived += OnFrameArrived;
         session = pool.CreateCaptureSession(item);
         session.IsCursorCaptureEnabled = false;
+        if (highFrameRate) RequestHighFrameRate(session);
         session.StartCapture();
+    }
+
+    static void RequestHighFrameRate(GraphicsCaptureSession captureSession)
+    {
+        // MinUpdateInterval is exposed by IGraphicsCaptureSession5 on Windows 11 24H2
+        // and newer. Query it at runtime to keep the Windows 10 capture path available.
+        using var sessionReference = new Com(((IWinRTObject)captureSession).NativeObject.GetRef());
+        using var sessionWithInterval = sessionReference.Query(CaptureSession5Id);
+        if (sessionWithInterval == null) return;
+
+        // IInspectable slots 0–5, then get_MinUpdateInterval and put_MinUpdateInterval.
+        const int setMinUpdateIntervalSlot = 7;
+        _ = ((delegate* unmanaged[Stdcall]<nint, long, int>)sessionWithInterval.Slot(setMinUpdateIntervalSlot))
+            (sessionWithInterval.P, TimeSpan.TicksPerMillisecond);
     }
 
     void CloseSession()

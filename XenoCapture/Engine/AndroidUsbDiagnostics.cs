@@ -16,12 +16,15 @@ internal static class AndroidUsbDiagnostics
     internal static async Task Run(string directory)
     {
         var firstBackend = new AndroidUsbCaptureBackend(detectUsb: false);
-        var secondBackend = new AndroidUsbCaptureBackend(detectUsb: false);
+        var secondBackend = new AndroidUsbCaptureBackend(detectUsb: false, playAudio: true, profile: AndroidPreviewProfile.DynamicFps);
         using var smooth = new AndroidUsbCaptureBackend(detectUsb: false, profile: AndroidPreviewProfile.Smooth);
         using var highDetail = new AndroidUsbCaptureBackend(detectUsb: false, playAudio: true, profile: AndroidPreviewProfile.HighDetail);
         CheckPreviewOptions(firstBackend, 1280, 30, "4M", playAudio: false);
         CheckPreviewOptions(smooth, 1280, 60, "5M", playAudio: false);
         CheckPreviewOptions(highDetail, 1920, 60, "8M", playAudio: true);
+        CheckPreviewOptions(secondBackend, 1280, null, "8M", playAudio: true);
+        if (secondBackend.CreatePreviewProcess("Diagnostic phone preview").Environment["SDL_RENDER_VSYNC"] != "0")
+            throw new InvalidOperationException("Dynamic FPS could be throttled by the off-screen helper's display sync.");
         CheckLibraryOverride();
         await MainWindow.CheckPhonePreviewDefaults();
 
@@ -47,7 +50,8 @@ internal static class AndroidUsbDiagnostics
             if (!IsWriteDenied(Path.Combine(firstFolder, "scrcpy-server")) || !IsWriteDenied(Path.Combine(secondFolder, "scrcpy-server")))
                 throw new InvalidOperationException("A staged helper file is writable during capture.");
             await CheckCommandAccess(firstBackend, firstFolder);
-            await AndroidUsbProtocolDiagnostics.Run(firstBackend);
+            await AndroidUsbProtocolDiagnostics.Run(firstBackend, expectedMaxFps: "30");
+            await AndroidUsbProtocolDiagnostics.Run(secondBackend, expectedMaxFps: null);
             using (var previewJob = new AndroidProcessJob())
             {
                 var info = firstBackend.CreatePreviewProcess("Diagnostic phone preview");
@@ -69,7 +73,7 @@ internal static class AndroidUsbDiagnostics
                 throw new InvalidOperationException("The second media listener stayed open after disconnect.");
 
             File.WriteAllText(Path.Combine(directory, "results.json"),
-                JsonSerializer.Serialize(new { passed = true, previewProfiles = true, aiOffByDefault = true,
+                JsonSerializer.Serialize(new { passed = true, previewProfiles = true, dynamicFpsTransport = true, aiOffByDefault = true,
                     isolatedListeners = true, stoppedWhileWaiting = true, protectedHelperFiles = true,
                     ignoredLibraryOverride = true, privateHelperCopies = true, privateCommands = true, mediaPeerIdentity = true, usbProtocol = true, physicalPhone = false }));
         }
@@ -79,10 +83,12 @@ internal static class AndroidUsbDiagnostics
         }
     }
 
-    static void CheckPreviewOptions(AndroidUsbCaptureBackend backend, int size, int fps, string bitrate, bool playAudio)
+    static void CheckPreviewOptions(AndroidUsbCaptureBackend backend, int size, int? fps, string bitrate, bool playAudio)
     {
         var args = backend.CreatePreviewProcess("Diagnostic phone preview").ArgumentList;
-        if (!args.Contains($"--max-size={size}") || !args.Contains($"--max-fps={fps}")
+        var frameRateArguments = args.Where(static arg => arg.StartsWith("--max-fps=", StringComparison.Ordinal));
+        var expectedFrameRateArguments = fps is int cap ? new[] { $"--max-fps={cap}" } : Array.Empty<string>();
+        if (!args.Contains($"--max-size={size}") || !frameRateArguments.SequenceEqual(expectedFrameRateArguments)
             || !args.Contains("--video-bit-rate=" + bitrate) || !args.Contains("--video-buffer=0")
             || !args.Contains("--force-adb-forward") || !args.Contains("--select-usb") || !args.Contains("--no-control") || !args.Contains("--no-clipboard-autosync")
             || args.Contains("--audio-source=output") != playAudio || args.Contains("--no-audio") == playAudio)

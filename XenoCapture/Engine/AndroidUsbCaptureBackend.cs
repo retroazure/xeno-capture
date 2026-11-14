@@ -16,7 +16,7 @@ using Microsoft.Win32.SafeHandles;
 
 namespace XenoCapture.Engine;
 
-internal enum AndroidPreviewProfile { Responsive, Smooth, HighDetail }
+internal enum AndroidPreviewProfile { Responsive, Smooth, HighDetail, DynamicFps }
 
 internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playAudio = false,
     AndroidPreviewProfile profile = AndroidPreviewProfile.Responsive) : ICaptureBackend
@@ -109,7 +109,8 @@ internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playA
             nint window = scrcpy.MainWindowHandle;
             if (window != 0 && scrcpy.MainWindowTitle == title)
             {
-                capture = new WindowCaptureBackend(WindowCaptureBackend.CreateItem(window));
+                capture = new WindowCaptureBackend(WindowCaptureBackend.CreateItem(window),
+                    highFrameRate: profile == AndroidPreviewProfile.DynamicFps);
                 capture.Open(cancellation);
                 return;
             }
@@ -124,13 +125,16 @@ internal sealed class AndroidUsbCaptureBackend(bool detectUsb = true, bool playA
         {
             AndroidPreviewProfile.Smooth => ("1280", "60", "5M"),
             AndroidPreviewProfile.HighDetail => ("1920", "60", "8M"),
+            AndroidPreviewProfile.DynamicFps => ("1280", (string?)null, "8M"),
             _ => ("1280", "30", "4M")
         };
         // Windows Graphics Capture needs a rendered window. Keep the helper beyond the desktop.
         var preview = HelperProcess("scrcpy.exe", "--select-usb", "--no-control",
             "--no-clipboard-autosync", "--force-adb-forward", "--window-borderless", "--window-x=30000", "--window-y=30000",
-            "--max-size=" + size, "--max-fps=" + fps, "--video-bit-rate=" + bitrate,
+            "--max-size=" + size, "--video-bit-rate=" + bitrate,
             "--video-buffer=0", "--window-title=" + title);
+        if (fps != null) preview.ArgumentList.Add("--max-fps=" + fps);
+        if (profile == AndroidPreviewProfile.DynamicFps) preview.Environment["SDL_RENDER_VSYNC"] = "0";
         if (bridge != null)
         {
             preview.ArgumentList.Add("--port=" + bridge.Port.ToString(System.Globalization.CultureInfo.InvariantCulture));

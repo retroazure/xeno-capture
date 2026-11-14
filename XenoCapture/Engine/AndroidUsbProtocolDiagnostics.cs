@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -14,11 +15,11 @@ namespace XenoCapture.Engine;
 
 internal static class AndroidUsbProtocolDiagnostics
 {
-    internal static async Task Run(AndroidUsbCaptureBackend backend)
+    internal static async Task Run(AndroidUsbCaptureBackend backend, string? expectedMaxFps)
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(18));
         using var key = RSA.Create(2048);
-        var phone = new FakePhone(key);
+        var phone = new FakePhone(key, expectedMaxFps);
         var connection = new AndroidAdbConnection(phone);
         try
         {
@@ -33,9 +34,11 @@ internal static class AndroidUsbProtocolDiagnostics
 
         var preview = backend.CreatePreviewProcess("Xeno USB transport diagnostic");
         preview.ArgumentList.Remove("--no-audio");
-        preview.ArgumentList.Add("--audio-codec=raw");
+        if (!preview.ArgumentList.Contains("--audio-codec=raw")) preview.ArgumentList.Add("--audio-codec=raw");
         using var process = backend.PreviewJob!.Start(preview);
         await phone.ShellStarted.Task.WaitAsync(deadline.Token);
+        if (!phone.FrameRateMatches)
+            throw new InvalidOperationException("The verified helper sent an unexpected frame-rate cap to the phone.");
         using (var outside = new TcpClient(AddressFamily.InterNetwork))
         {
             await outside.ConnectAsync(IPAddress.Loopback, backend.PreviewBridge!.Port, deadline.Token);
@@ -61,7 +64,7 @@ internal static class AndroidUsbProtocolDiagnostics
         await process.WaitForExitAsync(deadline.Token);
     }
 
-    sealed class FakePhone(RSA key) : IAndroidUsb
+    sealed class FakePhone(RSA key, string? expectedMaxFps) : IAndroidUsb
     {
         const uint Connect = 0x4e584e43, Auth = 0x48545541, Open = 0x4e45504f,
             Okay = 0x59414b4f, WritePacket = 0x45545257, Close = 0x45534c43;
@@ -76,6 +79,7 @@ internal static class AndroidUsbProtocolDiagnostics
         internal string Stage { get; private set; } = "connect";
         internal bool SignatureValid { get; private set; }
         internal bool PublicKeySent { get; private set; }
+        internal bool FrameRateMatches { get; private set; }
         internal byte[] PushedHash => SHA256.HashData(pushed.ToArray());
         internal ManualResetEventSlim ReleaseMedia { get; } = new();
         internal TaskCompletionSource ShellStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -167,7 +171,12 @@ internal static class AndroidUsbProtocolDiagnostics
                 service.Contains(" tunnel_forward=true", StringComparison.Ordinal) &&
                 service.Contains(" audio_codec=raw", StringComparison.Ordinal))
             {
-                string scid = Array.Find(service.Split(' '), static arg => arg.StartsWith("scid=", StringComparison.Ordinal))!;
+                string[] args = service.Split(' ');
+                var frameRateArgs = args.Where(static arg => arg.StartsWith("max_fps=", StringComparison.Ordinal));
+                FrameRateMatches = expectedMaxFps == null
+                    ? !frameRateArgs.Any()
+                    : frameRateArgs.SequenceEqual(new[] { "max_fps=" + expectedMaxFps });
+                string scid = Array.Find(args, static arg => arg.StartsWith("scid=", StringComparison.Ordinal))!;
                 mediaAddress = "localabstract:scrcpy_" + scid[5..];
                 Stage = "waiting for video connection";
                 Reply(Okay, ShellId, local, []);

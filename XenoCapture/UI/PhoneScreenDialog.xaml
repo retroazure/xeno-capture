@@ -15,6 +15,8 @@
       <ComboBoxItem Content="Responsive · 1280 px / 30 FPS"/>
       <ComboBoxItem Content="Smooth · 1280 px / 60 FPS"/>
       <ComboBoxItem Content="High detail · 1920 px / 60 FPS"/>
+      <ComboBoxItem Content="Dynamic FPS · 1280 px / device rate"
+                    ToolTip="Allows more than 60 FPS on compatible phones. The actual rate follows the phone, app, and Windows capture."/>
     </ComboBox>
     <CheckBox x:Name="PhoneAudio" Content="Phone output · Android 11 or newer" Margin="0,8,0,4"/>
     <TextBlock Text="Routes the phone's sound to this PC during mirroring."

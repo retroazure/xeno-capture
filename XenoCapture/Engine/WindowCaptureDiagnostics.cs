@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using System.Threading;
@@ -7,6 +8,7 @@ using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
 using Windows.Graphics.Capture;
+using XenoCapture.UI;
 
 namespace XenoCapture.Engine;
 
@@ -18,6 +20,12 @@ internal static class WindowCaptureDiagnostics
     {
         if (!GraphicsCaptureSession.IsSupported())
             throw new InvalidOperationException("Windows Graphics Capture is unavailable on this test machine.");
+
+        if (Array.IndexOf(Environment.GetCommandLineArgs(), "--high-rate") >= 0)
+        {
+            await CheckHighRate(directory);
+            return;
+        }
 
         int initialBuffers = Packet.LiveBuffers;
         var target = new Window
@@ -110,9 +118,86 @@ internal static class WindowCaptureDiagnostics
         }
     }
 
-    static CaptureStream NewInput(nint window)
+    static async Task CheckHighRate(string directory)
+    {
+        const int width = 320, height = 220, inputFps = 120;
+        int initialBuffers = Packet.LiveBuffers;
+        var target = new Window
+        {
+            Title = "Xeno Capture high-rate receiver diagnostic",
+            Width = width,
+            Height = height,
+            WindowStyle = WindowStyle.None,
+            ShowActivated = false,
+            ShowInTaskbar = false
+        };
+        target.SourceInitialized += (_, _) =>
+        {
+            nint handle = new WindowInteropHelper(target).Handle;
+            if (!PreviewWindow.PositionWindow(handle, new System.Drawing.Rectangle(30000, 30000, width, height)))
+                throw new InvalidOperationException("Could not position the off-screen test receiver.");
+        };
+        target.Show();
+        try
+        {
+            nint window = new WindowInteropHelper(target).Handle;
+            var input = NewInput(window, highFrameRate: true);
+            var failed = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+            int captured = 0;
+            int lastRed = -1;
+            input.Data += packet =>
+            {
+                byte red = packet.Bytes[(packet.Width * (packet.Height / 2) + packet.Width / 2) * 4 + 2];
+                if (red == lastRed) return;
+                lastRed = red;
+                Interlocked.Increment(ref captured);
+            };
+            input.Failed += error => failed.TrySetResult(error);
+            try
+            {
+                await input.Start().WaitAsync(Timeout);
+                var playback = Task.Run(() =>
+                {
+                    using var renderer = new D3DPreview(window, width, height);
+                    using var frame = new Packet(width * height * 4, width: width, height: height);
+                    using var signal = new AutoResetEvent(false);
+                    using var waiter = new FrameDeadlineWaiter(signal);
+                    long start = Clock.Now;
+                    for (int i = 0; i < inputFps * 3; i++)
+                    {
+                        waiter.WaitUntil(start + i * TimeSpan.TicksPerSecond / inputFps);
+                        if (renderer.WaitForFrameSlot(signal.SafeWaitHandle.DangerousGetHandle(), 8) != FrameSlotWait.Ready)
+                            continue;
+                        Array.Fill(frame.Bytes, (byte)i, 0, frame.Length);
+                        renderer.Draw(frame, 0);
+                        renderer.Present(allowBlocking: false, syncInterval: 0);
+                    }
+                });
+                await Task.Delay(400);
+                int before = Volatile.Read(ref captured);
+                var clock = Stopwatch.StartNew();
+                if (await Task.WhenAny(playback, failed.Task).WaitAsync(Timeout) == failed.Task)
+                    throw await failed.Task;
+                await playback;
+                double measuredFps = (Volatile.Read(ref captured) - before) / clock.Elapsed.TotalSeconds;
+                if (measuredFps <= 60)
+                    throw new InvalidOperationException($"Off-screen capture delivered only {measuredFps:F1} distinct FPS.");
+                File.WriteAllText(Path.Combine(directory, "results.json"), JsonSerializer.Serialize(new
+                {
+                    passed = true, sourceFps = inputFps, capturedFps = measuredFps, physicalPhone = false
+                }));
+            }
+            finally { await input.Stop(); }
+        }
+        finally { target.Close(); }
+
+        if (Packet.LiveBuffers != initialBuffers)
+            throw new InvalidOperationException("A high-rate capture buffer was retained after stopping.");
+    }
+
+    static CaptureStream NewInput(nint window, bool highFrameRate = false)
     {
         var item = WindowCaptureBackend.CreateItem(window);
-        return new CaptureStream(() => new WindowCaptureBackend(item), TimeSpan.FromSeconds(2));
+        return new CaptureStream(() => new WindowCaptureBackend(item, highFrameRate), TimeSpan.FromSeconds(2));
     }
 }
