@@ -336,10 +336,22 @@ internal static class PresentationStressDiagnostics
             if (cadence.Deadline(baseTime + 61 * period, period, resumed, hz) != resumed)
                 throw new InvalidOperationException("A single late frame delayed the next on-time capture.");
 
-            long shifted = resumed + period + delay;
-            if (cadence.Deadline(baseTime + 62 * period, period, shifted, hz) != shifted
-                || cadence.Deadline(baseTime + 63 * period, period, shifted + period, hz) != shifted + period
-                || cadence.Deadline(baseTime + 64 * period, period, shifted + 2 * period, hz) != shifted + 2 * period)
+            // This spike is shorter than half a frame and used to shift the
+            // clock even though every following capture was back on time.
+            long spike = resumed + period + 75_000;
+            if (cadence.Deadline(baseTime + 62 * period, period, spike, hz) != spike)
+                throw new InvalidOperationException("Steady pacing held an isolated delivery spike.");
+            for (int i = 63; i < 70; i++)
+            {
+                long time = baseTime + i * period;
+                if (cadence.Deadline(time, period, time + lag, hz) != time + lag)
+                    throw new InvalidOperationException("An isolated delivery spike delayed the following captures.");
+            }
+
+            long shifted = baseTime + 70 * period + lag + delay;
+            if (cadence.Deadline(baseTime + 70 * period, period, shifted, hz) != shifted
+                || cadence.Deadline(baseTime + 71 * period, period, shifted + period, hz) != shifted + period
+                || cadence.Deadline(baseTime + 72 * period, period, shifted + 2 * period, hz) != shifted + 2 * period)
                 throw new InvalidOperationException("Steady pacing did not catch up to a changed delivery phase.");
             cases.Add(new { hz, maximumScheduledGapErrorMs = maxDeviation / 10000.0, maximumHoldMs = maxHold / 10000.0 });
         }
@@ -352,7 +364,8 @@ internal static class PresentationStressDiagnostics
         var args = Environment.GetCommandLineArgs();
         bool steadyUltra = steadyOnly && Array.IndexOf(args, "--steady-pacing-ai-ultra") >= 0;
         bool steadyAi = steadyUltra || (steadyOnly && Array.IndexOf(args, "--steady-pacing-ai") >= 0);
-        var source = new PacedVideoBackend(1920, 1080, arrivalJitter, pan: aiMotion || steadyOnly);
+        long arrivalSpike = steadyOnly && Array.IndexOf(args, "--steady-pacing-spikes") >= 0 ? 95_000 : 0;
+        var source = new PacedVideoBackend(1920, 1080, arrivalJitter, pan: aiMotion || steadyOnly, arrivalSpike: arrivalSpike);
         var main = new MainWindow(false, false, (_, _) => new CaptureStream(() => source, TimeSpan.FromSeconds(2)))
             { ShowActivated = false };
         main.Show();
@@ -428,6 +441,13 @@ internal static class PresentationStressDiagnostics
                     ["dxgiDisplaySamples"] = displaySamples,
                     ["dxgiRefreshGapSamples"] = refreshGaps.Length
                 };
+                if (arrivalSpike > 0)
+                {
+                    var recoveryAges = sample.Where(frame => source.IsAfterSpike(frame.Time))
+                        .Select(frame => (frame.At - frame.Time) / 10000.0).Order().ToArray();
+                    report["spikeRecoverySamples"] = recoveryAges.Length;
+                    if (recoveryAges.Length > 0) report["spikeRecoveryAgeP95Ms"] = At(recoveryAges, .95);
+                }
                 // Windowed and mixed-monitor paths can return sparse DXGI samples.
                 if (refreshGaps.Length >= sample.Length * .75)
                 {
@@ -485,7 +505,7 @@ internal static class PresentationStressDiagnostics
                 return new()
                 {
                     ["displays"] = displays, ["injectedAlternateDelayMs"] = arrivalJitter / 10000.0,
-                    ["measuresPhysicalPixelResponse"] = false
+                    ["injectedSpikeMs"] = arrivalSpike / 10000.0, ["measuresPhysicalPixelResponse"] = false
                 };
             }
             var windowed = await Sample(main.DiagnosticPreview ?? throw new InvalidOperationException("No windowed preview host."));
@@ -521,8 +541,11 @@ internal static class PresentationStressDiagnostics
         }
         finally { await main.DiagnosticClose().WaitAsync(TimeSpan.FromSeconds(5)); }
     }
-    sealed class PacedVideoBackend(int width, int height, long arrivalJitter = 0, bool pan = false) : ICaptureBackend
+    sealed class PacedVideoBackend(int width, int height, long arrivalJitter = 0, bool pan = false, long arrivalSpike = 0) : ICaptureBackend
     {
+        const int SpikeInterval = 60;
+        const long Period = 166_667;
+        internal bool IsAfterSpike(long time) => (time - origin) / Period % SpikeInterval is >= 1 and <= 8;
         readonly ManualResetEvent stopped = new(false);
         SafeWaitHandle? timer; readonly nint[] waitHandles = new nint[2];
         readonly object shutdownGate = new(); bool disposed;
@@ -550,8 +573,10 @@ internal static class PresentationStressDiagnostics
         }
         public Packet? Read()
         {
-            long timestamp = arrivalJitter == 0 ? next : origin + Frames * 166667;
-            long extra = arrivalJitter != 0 && Frames % 2 == 1 ? arrivalJitter : 0;
+            long index = Frames;
+            long timestamp = arrivalJitter == 0 ? next : origin + index * Period;
+            long extra = index % 2 == 1 ? arrivalJitter : 0;
+            if (index % SpikeInterval == 0) extra += arrivalSpike;
             long delay = timestamp + extra - Clock.Now;
             if (delay > 0)
             {
@@ -562,10 +587,10 @@ internal static class PresentationStressDiagnostics
                 if (result != 1) throw new Win32Exception(Marshal.GetLastWin32Error(), "Synthetic frame timer wait failed.");
             }
             if (stopped.WaitOne(0)) return null;
-            long now = Clock.Now; next = Math.Max(next + 166667, now);
+            long now = Clock.Now; next = Math.Max(next + Period, now);
             if (previous != 0) intervals.Add((now - previous) / 10000.0); previous = now;
-            long index = Interlocked.Increment(ref frames);
-            var frame = new Packet(width * height * 3 / 2, false, width, height, PixelLayout.Nv12) { Time = arrivalJitter == 0 ? now : timestamp, Duration = 166667 };
+            index = Interlocked.Increment(ref frames);
+            var frame = new Packet(width * height * 3 / 2, false, width, height, PixelLayout.Nv12) { Time = arrivalJitter == 0 ? now : timestamp, Duration = Period };
             if (panPattern is { } pattern)
             {
                 int shift = (int)(index * 19 % width);

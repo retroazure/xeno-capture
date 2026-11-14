@@ -60,8 +60,7 @@ internal readonly record struct SourceFramePacing(long Time, long Duration, long
 
 internal struct FullscreenSourceCadence
 {
-    long previousTime, previousDuration, expectedArrival;
-    bool previousArrivalWasLate;
+    long previousTime, previousDuration, expectedArrival, lateArrival;
 
     internal static uint RefreshInterval(long duration, double refreshHz)
     {
@@ -80,23 +79,30 @@ internal struct FullscreenSourceCadence
             && Math.Abs(previousDuration - duration) <= duration / 32;
         previousTime = time;
         previousDuration = duration;
-        long error = arrival - (expectedArrival + duration);
-        if (!continuous || error < -duration / 2 || error > duration / 2)
+        long expected = expectedArrival + duration;
+        long error = arrival - expected;
+        if (!continuous || error < -duration / 2 || error > duration)
         {
-            // Show an isolated late frame immediately. Keep its original phase
-            // so the next on-time capture can resume steady presentation.
-            bool isolatedDelay = continuous && !previousArrivalWasLate
-                && error > duration / 2 && error <= duration;
-            expectedArrival = isolatedDelay ? expectedArrival + duration : arrival;
-            previousArrivalWasLate = isolatedDelay;
+            expectedArrival = arrival;
+            lateArrival = 0;
             return arrival;
         }
-        previousArrivalWasLate = false;
 
-        // Track the later edge of normal capture jitter without adding a fixed
-        // reserve to on-time frames. A late capture can always present immediately.
-        expectedArrival += duration + (error > 0 ? error : error / 32);
-        return arrival + Math.Clamp(expectedArrival - arrival, 0, MaximumHold(refreshHz));
+        long hold = MaximumHold(refreshHz);
+        // An arrival outside the jitter budget presents immediately. Keep the
+        // previous phase until consecutive captures confirm the later timing.
+        if (error > hold + 7_500)
+        {
+            bool phaseShift = lateArrival != 0 && Math.Abs(arrival - lateArrival - duration) <= hold;
+            expectedArrival = phaseShift ? arrival : expected;
+            lateArrival = phaseShift ? 0 : arrival;
+            return arrival;
+        }
+
+        lateArrival = 0;
+        // Track the later edge of normal jitter without adding a fixed reserve.
+        expectedArrival = expected + (error > 0 ? error : error / 32);
+        return arrival + Math.Clamp(expectedArrival - arrival, 0, hold);
     }
 }
 
