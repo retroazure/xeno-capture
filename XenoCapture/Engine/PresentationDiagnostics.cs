@@ -10,10 +10,24 @@ using XenoCapture.UI;
 namespace XenoCapture.Engine;
 internal static class PresentationDiagnostics
 {
-    public static async Task<Dictionary<string, object>> Run(CaptureDevice? device = null, VideoMode? mode = null, Action<string>? progress = null)
+    public static async Task<Dictionary<string, object>> Run(CaptureDevice? device = null, VideoMode? mode = null,
+        Action<string>? progress = null, System.Drawing.Rectangle? fullscreenBounds = null,
+        FrameGenerationMode frameGeneration = FrameGenerationMode.Off)
     {
-        using var host = new Direct3DHost { Active = true, Sharpness = 0.25 };
-        var window = new PreviewWindow(host) { Title = "Xeno Capture — checking video smoothness", Width = 660, Height = 420, WindowStyle = WindowStyle.ToolWindow, ShowActivated = false, Topmost = true, Content = host, WindowStartupLocation = WindowStartupLocation.CenterScreen };
+        using var host = new Direct3DHost(isFullscreen: fullscreenBounds.HasValue) { Active = true, Sharpness = 0.25 };
+        if (fullscreenBounds.HasValue)
+        {
+            host.AiVideo = new(true, 2160, 4);
+            host.SteadyFullscreenPacing = true;
+            host.FrameGeneration = frameGeneration;
+        }
+        var window = new PreviewWindow(host, displayBounds: fullscreenBounds is { } bounds ? () => bounds : null)
+        {
+            Title = "Xeno Capture — checking video smoothness", Width = 660, Height = 420,
+            WindowStyle = fullscreenBounds.HasValue ? WindowStyle.None : WindowStyle.ToolWindow,
+            ResizeMode = fullscreenBounds.HasValue ? ResizeMode.NoResize : ResizeMode.CanResize,
+            ShowActivated = false, Topmost = true, WindowStartupLocation = WindowStartupLocation.CenterScreen
+        };
         long displayed = 0; Exception? failure = null;
         var intervals = new List<double>(); var transit = new List<double>(); var sync = new object();
         long previous = 0; bool measure = false;
@@ -61,7 +75,9 @@ internal static class PresentationDiagnostics
             progress?.Invoke("starting capture"); if (capture != null) await capture.Start(); progress?.Invoke("waiting for first frame");
             await first.Task.WaitAsync(TimeSpan.FromSeconds(8)); progress?.Invoke("presenting frames"); await Task.Delay(250);
             lock (sync) measure = true;
-            long initial = Interlocked.Read(ref displayed), inputInitial = Interlocked.Read(ref submitted); var clock = Stopwatch.StartNew();
+            long initial = Interlocked.Read(ref displayed), inputInitial = Interlocked.Read(ref submitted);
+            long initialGenerated = host.GeneratedPresentations;
+            var clock = Stopwatch.StartNew();
             await Task.Delay(800);
             long beforeStall = Interlocked.Read(ref displayed);
             Thread.Sleep(300); // Deliberately block only WPF; the video thread must keep presenting.
@@ -69,11 +85,13 @@ internal static class PresentationDiagnostics
             await Task.Delay(1900); double seconds = clock.Elapsed.TotalSeconds;
             long frames = Interlocked.Read(ref displayed) - initial;
             if (failure != null) throw failure;
+            if (fullscreenBounds.HasValue && !host.AiVideoActive)
+                throw new InvalidOperationException(host.AiVideoFallbackReason ?? "4K Ultra AI was inactive during the capture test.");
             if (frames < 120 || duringStall < 8) throw new InvalidOperationException($"Video presentation stalled: {frames} frames, {duringStall} during a 300 ms UI pause.");
             lock (sync)
             {
                 intervals.Sort(); transit.Sort();
-                return new()
+                var report = new Dictionary<string, object>()
                 {
                     ["inputFrames"] = Interlocked.Read(ref submitted) - inputInitial, ["videoLayout"] = capture?.Layout.ToString() ?? "Nv12",
                     ["presentedFrames"] = frames, ["presentationFps"] = frames / seconds,
@@ -83,6 +101,13 @@ internal static class PresentationDiagnostics
                     ["presentationTestUsesPhysicalCaptureCard"] = capture != null,
                     ["presentationTestMeasuresButtonToScreenLatency"] = false
                 };
+                if (fullscreenBounds.HasValue)
+                {
+                    report["aiVideo"] = host.AiVideoStatus;
+                    report["frameGeneration"] = frameGeneration.ToString();
+                    report["generatedPresentations"] = host.GeneratedPresentations - initialGenerated;
+                }
+                return report;
             }
         }
         catch (Exception ex) { failure ??= ex; throw; }

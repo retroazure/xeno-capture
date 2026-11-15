@@ -353,10 +353,17 @@ internal static class FrameGenerationDiagnostics
                 "Gap recovery did not selectively fill missing frames.");
             Require(recovered.SourceFps > 48 && recovered.LongGapsPerSecond < baseline.LongGapsPerSecond * .85,
                 $"Gap recovery did not reduce long gaps while preserving source delivery ({baseline.LongGapsPerSecond:F1} to {recovered.LongGapsPerSecond:F1}/s).");
+            main.DiagnosticSetSteadyFullscreenPacing(true);
+            var recoveredSteady = await Sample();
+            Require(recoveredSteady.PredictedFps > 2 && recoveredSteady.PredictedFps < 10 && recoveredSteady.SourceFps > 48
+                && recoveredSteady.LongGapsPerSecond < baseline.LongGapsPerSecond * .85,
+                $"Steady cadence did not preserve gap recovery ({baseline.LongGapsPerSecond:F1} to {recoveredSteady.LongGapsPerSecond:F1} long gaps/s).");
             checks["gapRecovery"] = new
             {
                 baselineLongGapsPerSecond = baseline.LongGapsPerSecond, recoveryLongGapsPerSecond = recovered.LongGapsPerSecond,
-                baselineSourceFps = baseline.SourceFps, recoverySourceFps = recovered.SourceFps, predictedFps = recovered.PredictedFps
+                baselineSourceFps = baseline.SourceFps, recoverySourceFps = recovered.SourceFps, predictedFps = recovered.PredictedFps,
+                steadyLongGapsPerSecond = recoveredSteady.LongGapsPerSecond, steadySourceFps = recoveredSteady.SourceFps,
+                steadyPredictedFps = recoveredSteady.PredictedFps
             };
             return checks;
         }

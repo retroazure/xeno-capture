@@ -375,7 +375,9 @@ internal static class PresentationStressDiagnostics
     {
         const long period = 166667, arrivalJitter = 30_000;
         var args = Environment.GetCommandLineArgs();
-        bool steadyUltra = steadyOnly && Array.IndexOf(args, "--steady-pacing-ai-ultra") >= 0;
+        bool aiBurstCheck = steadyOnly && Array.IndexOf(args, "--ai-latest-during-hold") >= 0;
+        bool recoveringGaps = aiMotion || (steadyOnly && Array.IndexOf(args, "--recover-gaps") >= 0);
+        bool steadyUltra = aiBurstCheck || (steadyOnly && Array.IndexOf(args, "--steady-pacing-ai-ultra") >= 0);
         bool steadyAi = steadyUltra || (steadyOnly && Array.IndexOf(args, "--steady-pacing-ai") >= 0);
         long arrivalSpike = steadyOnly && Array.IndexOf(args, "--steady-pacing-short-spikes") >= 0 ? 52_000
             : steadyOnly && Array.IndexOf(args, "--steady-pacing-spikes") >= 0 ? 95_000 : 0;
@@ -388,10 +390,10 @@ internal static class PresentationStressDiagnostics
         try
         {
             main.DiagnosticPrepareInput();
+            if (recoveringGaps) main.DiagnosticSelectFrameGeneration(FrameGenerationMode.RecoverGaps);
             if (aiMotion)
             {
                 main.DiagnosticSelectAiVideo(true, 2160, 4);
-                main.DiagnosticSelectFrameGeneration(FrameGenerationMode.RecoverGaps);
                 await main.DiagnosticConnectFullscreen(fastestMonitor: true);
                 await WaitFor(() => main.DiagnosticPreview?.AiVideoActive == true);
             }
@@ -414,15 +416,20 @@ internal static class PresentationStressDiagnostics
                     if (frame.Kind == PresentationKind.Source)
                         lock (frames) frames.Add((Clock.Now, frame.Time));
                 }
+                int steadyDraws = 0;
+                void OnSteadyDraw() => Interlocked.Increment(ref steadyDraws);
                 host.FramePresented += OnPresent;
                 host.DiagnosticDisplayFrame += OnDisplay;
+                host.DiagnosticSteadySourceDraw += OnSteadyDraw;
                 long initialPacingWaits = host.SourcePacingWaits;
+                long initialGenerated = host.GeneratedPresentations;
                 var elapsed = Stopwatch.StartNew();
                 try { await Task.Delay(aiMotion || steadyOnly ? 6000 : 3000); }
                 finally
                 {
                     host.FramePresented -= OnPresent;
                     host.DiagnosticDisplayFrame -= OnDisplay;
+                    host.DiagnosticSteadySourceDraw -= OnSteadyDraw;
                 }
                 (long At, long Time)[] sample;
                 double[] refreshGaps;
@@ -438,7 +445,7 @@ internal static class PresentationStressDiagnostics
                         .Select(gap => (double)gap).Order().ToArray();
                 }
                 double fps = sample.Length / elapsed.Elapsed.TotalSeconds;
-                if (fps < 55 || (!aiMotion && host.GeneratedPresentations != 0))
+                if (fps < 55 || (!recoveringGaps && host.GeneratedPresentations != 0))
                     throw new InvalidOperationException($"Native preview was not presenting the captured source at 60 FPS ({fps:F2}).");
                 var gaps = sample.Zip(sample.Skip(1), (a, b) => (b.At - a.At) / 10000.0).ToArray();
                 var ages = sample.Select(frame => (frame.At - frame.Time) / 10000.0).Order().ToArray();
@@ -453,6 +460,8 @@ internal static class PresentationStressDiagnostics
                     ["gapP99Ms"] = At(gaps.Order().ToArray(), .99), ["sampleAgeP50Ms"] = At(ages, .50),
                     ["sampleAgeP95Ms"] = At(ages, .95), ["frameWaitTimeouts"] = host.FrameWaitTimeouts,
                     ["sourcePacingWaits"] = host.SourcePacingWaits - initialPacingWaits,
+                    ["steadySourceDraws"] = Volatile.Read(ref steadyDraws),
+                    ["generatedPresentations"] = host.GeneratedPresentations - initialGenerated,
                     ["displayRefreshHz"] = refreshHz,
                     ["dxgiDisplaySamples"] = displaySamples,
                     ["dxgiRefreshGapSamples"] = refreshGaps.Length
@@ -513,6 +522,14 @@ internal static class PresentationStressDiagnostics
                     await main.DiagnosticFullscreenOnDisplay(screen.Bounds);
                     var host = main.DiagnosticPreview ?? throw new InvalidOperationException("No fullscreen host for steady pacing.");
                     if (steadyAi) await WaitFor(() => host.AiVideoActive);
+                    if (aiBurstCheck)
+                    {
+                        double replacementAgeMs = await CheckAiHoldReplacement(host);
+                        displays.Add(new { hz, screen.Bounds.Width, screen.Bounds.Height, replacementAgeMs,
+                            latestCapturePresentedFirst = true });
+                        await main.DiagnosticWindowed();
+                        continue;
+                    }
                     var ordinary = steadyOnlySample ? null : await Sample(host);
 
                     main.DiagnosticSetSteadyFullscreenPacing(true);
@@ -534,7 +551,7 @@ internal static class PresentationStressDiagnostics
                 {
                     ["displays"] = displays, ["injectedAlternateDelayMs"] = arrivalJitter / 10000.0,
                     ["injectedSpikeMs"] = arrivalSpike / 10000.0, ["alternatesJitterWithStableDelivery"] = settle,
-                    ["measuresPhysicalPixelResponse"] = false
+                    ["recoverGaps"] = recoveringGaps, ["measuresPhysicalPixelResponse"] = false
                 };
             }
             var windowed = await Sample(main.DiagnosticPreview ?? throw new InvalidOperationException("No windowed preview host."));
@@ -570,6 +587,41 @@ internal static class PresentationStressDiagnostics
         }
         finally { await main.DiagnosticClose().WaitAsync(TimeSpan.FromSeconds(5)); }
     }
+    static async Task<double> CheckAiHoldReplacement(Direct3DHost host)
+    {
+        using var newer = new Packet(1920 * 1080 * 3 / 2, false, 1920, 1080, PixelLayout.Nv12) { Duration = 166_667 };
+        Array.Fill(newer.Bytes, (byte)96, 0, 1920 * 1080);
+        Array.Fill(newer.Bytes, (byte)128, 1920 * 1080, 1920 * 1080 / 2);
+        var presented = new TaskCompletionSource<(long Time, long Arrival)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        long replacementTime = 0;
+
+        void OnPresent(PresentedFrame frame)
+        {
+            if (Interlocked.Read(ref replacementTime) != 0)
+                presented.TrySetResult((frame.Time, Clock.Now));
+        }
+        host.FramePresented += OnPresent;
+        host.DiagnosticDuringSourceHold = () =>
+        {
+            host.DiagnosticDuringSourceHold = null;
+            newer.Time = Clock.Now;
+            Interlocked.Exchange(ref replacementTime, newer.Time);
+            host.Submit(newer);
+        };
+        try
+        {
+            var first = await presented.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            if (first.Time != replacementTime)
+                throw new InvalidOperationException("The paced AI draw presented an older frame ahead of its replacement.");
+            return (first.Arrival - replacementTime) / 10000.0;
+        }
+        finally
+        {
+            host.DiagnosticDuringSourceHold = null;
+            host.FramePresented -= OnPresent;
+        }
+    }
+
     sealed class PacedVideoBackend(int width, int height, long arrivalJitter = 0, bool pan = false, long arrivalSpike = 0,
         bool settle = false) : ICaptureBackend
     {

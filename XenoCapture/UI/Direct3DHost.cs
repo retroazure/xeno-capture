@@ -80,6 +80,8 @@ internal sealed partial class Direct3DHost : HwndHost
     internal long SkippedAfterWait => Interlocked.Read(ref skippedAfterWait);
     internal Action? DiagnosticBeforeFrameLatch { get; set; }
     internal Action? DiagnosticAfterSourceDraw { get; set; }
+    internal Action? DiagnosticDuringSourceHold { get; set; }
+    internal Action? DiagnosticSteadySourceDraw { get; set; }
     internal event Action<uint, uint>? DiagnosticDisplayFrame;
     internal long EmptyWakeups => Interlocked.Read(ref emptyWakeups);
     internal long FrameWaitTimeouts => Interlocked.Read(ref frameWaitTimeouts);

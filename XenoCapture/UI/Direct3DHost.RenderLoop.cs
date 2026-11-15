@@ -139,8 +139,7 @@ internal sealed partial class Direct3DHost
                 UpdateFrameGenerationMode(requested);
 
                 bool paceSource = (requested == FrameGenerationMode.Off || prediction.RecoveringGaps) && host.SmoothSourcePacing;
-                bool steadySource = host.isFullscreen && paceSource && requested == FrameGenerationMode.Off
-                    && host.SteadyFullscreenPacing && !entryAnimating;
+                bool steadySource = host.isFullscreen && paceSource && host.SteadyFullscreenPacing && !entryAnimating;
                 if (!steadySource) steadyCadence = default;
                 if ((multiplier > 1 || prediction.Requested || paceSource) && (capture.HasFrame || Renderer.HasInterpolationFrame))
                     UpdateRefreshRate();
@@ -191,7 +190,6 @@ internal sealed partial class Direct3DHost
             }
 
             ResetFrameSchedule(requested);
-            steadyCadence = default;
             lock (host.gate)
             {
                 host.inactiveWaiter?.TrySetResult();
@@ -211,6 +209,7 @@ internal sealed partial class Direct3DHost
             predictionDue = 0;
             predictionShown = false;
             sourcePacing = default;
+            steadyCadence = default;
         }
 
         void UpdateFrameGenerationMode(FrameGenerationMode requested)

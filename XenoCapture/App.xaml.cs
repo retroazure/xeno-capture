@@ -78,7 +78,9 @@ public partial class App : Application
             StartMediaFoundation();
             await (mode switch
             {
-                "--card-test" => RunCardDiagnosticAsync(cardName!, directory),
+                "--card-test" => RunCardDiagnosticAsync(cardName!, directory,
+                    Array.IndexOf(args, "--fullscreen-ultra", index + 3) >= 0,
+                    Array.IndexOf(args, "--recover-gaps", index + 3) >= 0),
                 "--android-usb-tests" => AndroidUsbDiagnostics.Run(directory),
                 "--window-capture-tests" => WindowCaptureDiagnostics.Run(directory),
                 "--theme-tests" => XenoCapture.MainWindow.CheckAppearance(directory),
@@ -130,7 +132,7 @@ public partial class App : Application
         return args[index];
     }
 
-    static async Task RunCardDiagnosticAsync(string name, string directory)
+    static async Task RunCardDiagnosticAsync(string name, string directory, bool fullscreenUltra, bool recoverGaps)
     {
         var available = await Task.Run(() => CaptureDevices.List(false));
         var matches = available.FindAll(device => string.Equals(device.Name.Trim(), name.Trim(), StringComparison.OrdinalIgnoreCase));
@@ -138,9 +140,23 @@ public partial class App : Application
         var modes = await Task.Run(() => CaptureDevices.Modes(matches[0]));
         var mode = modes.Find(mode => mode.Width == 1920 && mode.Height == 1080 && mode.Fps is > 59 and < 61 && mode.Subtype == Keys.Nv12)
             ?? throw new InvalidOperationException("1080p60 NV12 is not available.");
-        var results = await PresentationDiagnostics.Run(matches[0], mode,
-            step => File.WriteAllText(Path.Combine(directory, "stage.txt"), step));
-        await WriteResultsAsync(directory, results);
+        void Progress(string step) => File.WriteAllText(Path.Combine(directory, "stage.txt"), step);
+        if (!fullscreenUltra)
+        {
+            var results = await PresentationDiagnostics.Run(matches[0], mode, Progress);
+            await WriteResultsAsync(directory, results);
+            return;
+        }
+
+        var displays = new System.Collections.Generic.List<object>();
+        foreach (var screen in System.Windows.Forms.Screen.AllScreens)
+        {
+            double refreshHz = DisplayTiming.RefreshRateForDevice(screen.DeviceName);
+            var frameGeneration = recoverGaps ? FrameGenerationMode.RecoverGaps : FrameGenerationMode.Off;
+            var timing = await PresentationDiagnostics.Run(matches[0], mode, Progress, screen.Bounds, frameGeneration);
+            displays.Add(new { screen.Bounds.Width, screen.Bounds.Height, refreshHz, timing });
+        }
+        await WriteResultsAsync(directory, new { result = "PASS", displays });
     }
 
     static Task RunPresentationDiagnosticAsync(string directory, string[] args, int index)

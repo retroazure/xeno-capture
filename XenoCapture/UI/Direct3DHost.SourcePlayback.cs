@@ -56,6 +56,7 @@ internal sealed partial class Direct3DHost
             uint sourceInterval = prepareAhead && clockInterval != 0
                 ? FullscreenSourceCadence.RefreshInterval(frame.Duration, refreshHz) : 0;
             bool useSteadyCadence = sourceInterval != 0;
+            if (useSteadyCadence) host.DiagnosticSteadySourceDraw?.Invoke();
             long sourceDue = useSteadyCadence
                 ? steadyCadence.Deadline(frame.Time, frame.Duration, consumedArrival, refreshHz)
                 : prepareAhead ? SourcePacingDeadline(frame, consumedArrival, LastSourceDisplayTime(), prepareAhead: true) : 0;
@@ -69,13 +70,13 @@ internal sealed partial class Direct3DHost
             // Refresh at most once after a long draw so bursts cannot starve presentation.
             using var fresh = RefreshAfterAiStartup(featureCreations, frame.Duration)
                 ?? (Clock.Now - consumedArrival >= Math.Max(50_000, frame.Duration) ? TakeLatestFrame() : null);
-            if (fresh == null) WaitAfterSourceDraw(requested, sourceDue, useSteadyCadence);
-            using var replacement = fresh == null && useSteadyCadence ? TakeLatestFrame() : null;
+            bool supersededDuringHold = fresh == null && WaitAfterSourceDraw(requested, sourceDue, useSteadyCadence);
+            using var replacement = fresh == null && (useSteadyCadence || supersededDuringHold) ? TakeLatestFrame() : null;
             var newest = fresh ?? replacement;
             if (newest != null)
             {
                 if (useSteadyCadence)
-                    steadyCadence.Deadline(newest.Time, newest.Duration, consumedArrival, refreshHz);
+                    sourceDue = steadyCadence.Deadline(newest.Time, newest.Duration, consumedArrival, refreshHz);
                 DrawSourceFrame(newest, prediction, predicting, false, ref predictionInterval);
             }
             if (!IsActive()) return;
@@ -84,8 +85,10 @@ internal sealed partial class Direct3DHost
             // A slow inference, a changed presentation phase, or a replaced capture
             // should leave the next refresh available to catch up.
             long queuedAt = Clock.Now;
-            bool steadyPresent = useSteadyCadence && newest == null && host.SteadyFullscreenPacing
-                && host.FrameGeneration == requested
+            // Recovery needs to be able to fill a missed source interval without
+            // waiting for the previous real frame's multi-refresh reservation.
+            bool steadyPresent = useSteadyCadence && requested == FrameGenerationMode.Off && newest == null
+                && host.SteadyFullscreenPacing && host.FrameGeneration == requested
                 && Math.Abs(sourcePacing.Duration - frame.Duration) <= frame.Duration / 32
                 && Math.Abs(frame.Time - sourcePacing.Time - frame.Duration) <= frame.Duration / 4
                 && queuedAt - consumedArrival < 10_000_000 / refreshHz
@@ -98,7 +101,7 @@ internal sealed partial class Direct3DHost
                     && SourceFramePacing.HasRefreshHeadroom(refreshHz, shown.Duration) ? Renderer.LastPresentCount() : null;
                 sourcePacing = new(shown.Time, shown.Duration, consumedArrival, presentCount);
             }
-            if (predicting) SchedulePrediction(accepted, prediction, predictionInterval);
+            if (predicting) SchedulePrediction(accepted, prediction, predictionInterval, useSteadyCadence ? sourceDue : 0);
         }
 
         long GetPredictionInterval(PredictionMode mode, long contentPeriod) => mode.RecoveringGaps
@@ -198,36 +201,40 @@ internal sealed partial class Direct3DHost
             return true;
         }
 
-        void WaitAfterSourceDraw(FrameGenerationMode requested, long due, bool steady)
+        bool WaitAfterSourceDraw(FrameGenerationMode requested, long due, bool steady)
         {
-            if (due <= Clock.Now || !host.SmoothSourcePacing || host.FrameGeneration != requested || !IsActive()) return;
+            if (due <= Clock.Now || !host.SmoothSourcePacing || host.FrameGeneration != requested || !IsActive()) return false;
 
             // Start GPU work during the hold so it can finish before the present deadline.
             Renderer.SubmitPendingDraw();
-            while (due > Clock.Now && host.SmoothSourcePacing && host.FrameGeneration == requested
-                && (!steady || host.SteadyFullscreenPacing) && IsActive())
+            host.DiagnosticDuringSourceHold?.Invoke();
+            while (host.SmoothSourcePacing && host.FrameGeneration == requested && (!steady || host.SteadyFullscreenPacing))
             {
-                if (steady)
+                lock (host.gate)
                 {
-                    lock (host.gate) { if (host.latest != null) return; }
+                    if (host.stopping || !host.active) return false;
+                    if (host.latest != null) return true;
                 }
-                if (!WaitForSourceDeadline(due)) break;
+                if (due <= Clock.Now || !WaitForSourceDeadline(due)) break;
             }
+            return false;
         }
 
-        void SchedulePrediction(bool accepted, PredictionMode mode, long interval)
+        void SchedulePrediction(bool accepted, PredictionMode mode, long interval, long sourceDue)
         {
             bool hasPair = accepted && Renderer.HasInterpolationPair;
             Volatile.Write(ref host.frameGenerationActive, hasPair);
             if (!hasPair) return;
 
-            predictionArrival = consumedArrival;
+            // The same clock that spaces real captures tells gap recovery when
+            // the next capture is genuinely late. Early arrivals can carry jitter.
+            predictionArrival = mode.RecoveringGaps ? Math.Max(consumedArrival, sourceDue) : consumedArrival;
             if (mode.RecoveringGaps)
             {
                 predictionDue = Math.Max(lastPresentedAt + contentFramePeriod / 2,
-                    consumedArrival + contentFramePeriod + FrameGenerationPolicy.GapRecoveryGrace(contentFramePeriod));
-                predictionEnd = consumedArrival + contentFramePeriod + FrameGenerationPolicy.GapRecoveryExpiry(contentFramePeriod);
-                predictionRestoreAt = consumedArrival + contentFramePeriod * 3;
+                    predictionArrival + contentFramePeriod + FrameGenerationPolicy.GapRecoveryGrace(contentFramePeriod));
+                predictionEnd = predictionArrival + contentFramePeriod + FrameGenerationPolicy.GapRecoveryExpiry(contentFramePeriod);
+                predictionRestoreAt = predictionArrival + contentFramePeriod * 3;
             }
             else
             {

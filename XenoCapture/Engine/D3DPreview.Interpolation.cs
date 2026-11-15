@@ -232,8 +232,14 @@ internal sealed unsafe partial class D3DPreview
             int pixels = frameWidth * frameHeight;
             UnmatchedHighContrastFraction = generated.Changed / (double)pixels;
             bool extensiveUnmatchedMotion = generated.Changed > pixels / 8;
-            bool unsafeSynthesis = extensiveUnmatchedMotion &&
-                (multiplier <= 3 || generated.Generated < generated.Changed * 2);
+            // Allow a coherent camera pan with a localized occlusion. At 2×
+            // and 3× require four times as many synthesized pixels as unmatched
+            // ones, and keep the unmatched area below a fifth of the image.
+            bool enoughMotionEvidence = multiplier == 4
+                ? generated.Generated >= generated.Changed * 2
+                : HardwareOpticalFlowActive && generated.Changed <= pixels / 5
+                    && generated.Generated >= generated.Changed * 4;
+            bool unsafeSynthesis = extensiveUnmatchedMotion && !enoughMotionEvidence;
             if (unsafeSynthesis)
             {
                 CanGenerateMidpoint = false;

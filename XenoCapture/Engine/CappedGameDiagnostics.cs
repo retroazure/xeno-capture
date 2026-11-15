@@ -150,11 +150,7 @@ internal static class CappedGameDiagnostics
             for (int y = 26; y < 52; y++)
                 Require(pixels.AsSpan((y * 640 + 42) * 4, 138 * 4).SequenceEqual(expected.Bytes.AsSpan((y * 640 + 42) * 4, 138 * 4)),
                     "Layered motion changed the static HUD.");
-            if (renderer.HardwareOpticalFlowActive && factor <= 3)
-                Require(result.Kind == PresentationKind.Repeated && renderer.FrameGenerationDetail == "Uncertain motion fallback"
-                    && pixels.AsSpan().SequenceEqual(first.Bytes.AsSpan(0, first.Length)),
-                    $"Layered motion produced an unsafe image at {factor}x phase {step}.");
-            else if (renderer.HardwareOpticalFlowActive)
+            if (renderer.HardwareOpticalFlowActive)
                 Require(result.Kind == PresentationKind.Interpolated && error < repeatError * .4 && badPixels < 4500,
                     $"Layered motion showed excessive distortion at {factor}x phase {step}: {badPixels} high-error pixels.");
             measurements.Add(new { factor, step, phase, hardware = renderer.HardwareOpticalFlowActive,
