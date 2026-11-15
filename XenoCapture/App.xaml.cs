@@ -17,7 +17,7 @@ public partial class App : Application
     [
         "--card-test", "--android-usb-tests", "--window-capture-tests", "--theme-tests", "--ai-video-tests", "--capped-game-tests", "--capped-game-soak",
         "--rtx-video-tests", "--framegen-soak", "--framegen-tests", "--upscaling-tests",
-        "--scheduling-benchmark", "--render-benchmark", "--presentation-tests", "--shutdown-tests", "--self-test"
+        "--scheduling-benchmark", "--render-benchmark", "--presentation-tests", "--shutdown-tests", "--recording-tests", "--self-test"
     ];
     static readonly JsonSerializerOptions ReportJson = new() { WriteIndented = true };
     bool mediaFoundationStarted;
@@ -80,7 +80,8 @@ public partial class App : Application
             {
                 "--card-test" => RunCardDiagnosticAsync(cardName!, directory,
                     Array.IndexOf(args, "--fullscreen-ultra", index + 3) >= 0,
-                    Array.IndexOf(args, "--recover-gaps", index + 3) >= 0),
+                    Array.IndexOf(args, "--recover-gaps", index + 3) >= 0,
+                    Array.IndexOf(args, "--motion-timing", index + 3) >= 0),
                 "--android-usb-tests" => AndroidUsbDiagnostics.Run(directory),
                 "--window-capture-tests" => WindowCaptureDiagnostics.Run(directory),
                 "--theme-tests" => XenoCapture.MainWindow.CheckAppearance(directory),
@@ -95,6 +96,9 @@ public partial class App : Application
                 "--render-benchmark" => WriteBenchmarkAsync(directory, RenderPerformanceDiagnostics.Run),
                 "--presentation-tests" => RunPresentationDiagnosticAsync(directory, args, index),
                 "--shutdown-tests" => RunShutdownDiagnosticAsync(directory),
+                "--recording-tests" => WriteResultsAsync(directory,
+                    Array.IndexOf(args, "--fullscreen", index + 2) >= 0
+                        ? await RecordingDiagnostics.RunFullscreen(directory) : await RecordingDiagnostics.Run(directory)),
                 "--self-test" => Diagnostics.Run(directory),
                 _ => throw new ArgumentOutOfRangeException(nameof(mode))
             });
@@ -132,7 +136,7 @@ public partial class App : Application
         return args[index];
     }
 
-    static async Task RunCardDiagnosticAsync(string name, string directory, bool fullscreenUltra, bool recoverGaps)
+    static async Task RunCardDiagnosticAsync(string name, string directory, bool fullscreenUltra, bool recoverGaps, bool motionTiming)
     {
         var available = await Task.Run(() => CaptureDevices.List(false));
         var matches = available.FindAll(device => string.Equals(device.Name.Trim(), name.Trim(), StringComparison.OrdinalIgnoreCase));
@@ -141,6 +145,14 @@ public partial class App : Application
         var mode = modes.Find(mode => mode.Width == 1920 && mode.Height == 1080 && mode.Fps is > 59 and < 61 && mode.Subtype == Keys.Nv12)
             ?? throw new InvalidOperationException("1080p60 NV12 is not available.");
         void Progress(string step) => File.WriteAllText(Path.Combine(directory, "stage.txt"), step);
+        if (motionTiming)
+        {
+            var display = fullscreenUltra ? System.Windows.Forms.Screen.AllScreens.OrderByDescending(screen => screen.Bounds.Height).First() : null;
+            var generation = recoverGaps ? FrameGenerationMode.RecoverGaps : FrameGenerationMode.Off;
+            var results = await PresentationDiagnostics.Run(matches[0], mode, Progress, display?.Bounds, generation, measureMotion: true);
+            await WriteResultsAsync(directory, results);
+            return;
+        }
         if (!fullscreenUltra)
         {
             var results = await PresentationDiagnostics.Run(matches[0], mode, Progress);

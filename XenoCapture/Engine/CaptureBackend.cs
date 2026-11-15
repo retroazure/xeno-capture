@@ -25,6 +25,7 @@ internal sealed class MediaCaptureBackend(CaptureDevice device, VideoMode? mode,
     SourceReaderCallback? callback;
     int disposed, width, height, stride;
     bool fullRange, bt601;
+    VideoFrameRate videoRate;
     long? firstTimestamp;
     long origin;
     CancellationToken captureCancellation;
@@ -104,6 +105,9 @@ internal sealed class MediaCaptureBackend(CaptureDevice device, VideoMode? mode,
             width = w;
             height = h;
             stride = pitch;
+            var (n, d) = Keys.Unpair(actual.Get64(Keys.Rate));
+            videoRate = new(n, d);
+            if (!videoRate.IsValid && mode != null) videoRate = new(mode.Numerator, mode.Denominator);
             fullRange = actual.U32(Keys.NominalRange) == 1;
             bt601 = actual.Get32(Keys.YuvMatrix, width < 1280 ? 2u : 1u) == 2;
         }
@@ -150,7 +154,8 @@ internal sealed class MediaCaptureBackend(CaptureDevice device, VideoMode? mode,
                 else
                     for (int row = 0; row < copy.Rows; row++)
                         Marshal.Copy(checked(data + (nint)copy.RowOffset(row)), packet.Bytes, row * copy.RowBytes, copy.RowBytes);
-                packet.Duration = mode == null ? 333333 : (long)(10_000_000 / mode.Fps);
+                packet.Duration = videoRate.IsValid ? videoRate.Duration : 333_333;
+                packet.VideoRate = videoRate;
             }
             if (firstTimestamp == null) { firstTimestamp = timestamp; origin = Clock.Now - packet.Duration; }
             try

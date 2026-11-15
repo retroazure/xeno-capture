@@ -28,7 +28,7 @@ internal sealed unsafe partial class D3DPreview
     int frameCurrent = -1, framePrevious = -1, frameWidth, frameHeight, analysisWidth, analysisHeight, flowWidth, flowHeight;
     int frameAnalysisSamples, frameBudgetOverruns;
     long frameCurrentTime, framePreviousTime, frameCurrentDuration, framePreviousDuration, frameCooldown;
-    bool frameDisabled;
+    bool frameDisabled, predictiveSurfaces;
     Packet? frameLastDistinct;
     internal long ExactInterpolationRepeats { get; private set; }
     public bool HasInterpolationFrame => frameCurrent >= 0;
@@ -54,14 +54,23 @@ internal sealed unsafe partial class D3DPreview
     {
         if (ForceFrameGenerationUnavailable) throw new InterpolationUnavailableException("Frame generation is unavailable on this device.");
         if ((long)w * h > 1920L * 1080) throw new InterpolationUnavailableException("Lightweight frame generation supports up to 1080p input.");
-        if (frameDownsample != null && frameWidth == w && frameHeight == h) return;
-        DisposeInterpolation(); frameWidth = w; frameHeight = h;
+        if (frameDownsample != null && frameWidth == w && frameHeight == h && predictiveSurfaces == predictive) return;
+        DisposeInterpolation();
+        frameWidth = w; frameHeight = h;
+        predictiveSurfaces = predictive;
         double scale = Math.Min(1, Math.Min(320.0 / w, 180.0 / h));
         analysisWidth = Math.Max(1, (int)Math.Round(w * scale)); analysisHeight = Math.Max(1, (int)Math.Round(h * scale));
         flowWidth = (analysisWidth + 7) / 8; flowHeight = (analysisHeight + 7) / 8;
         frameDownsample = Shader(DownsampleCode.Value, 18); frameCompare = Shader(CompareCode.Value, 18);
         frameMotion = Shader(MotionCode.Value, 18); frameSynthesize = Shader(SynthesizeCode.Value, 18);
-        for (int index = 0; index < 2; index++) { frameRgb[index] = new GpuSurface(this, w, h, true, 87); frameLow[index] = new GpuSurface(this, analysisWidth, analysisHeight, false); }
+        // Prediction uses software motion analysis. Keep its RGB frames in
+        // the VSR input format so that playback can reuse the same texture.
+        uint inputFormat = predictive ? 28u : 87u;
+        for (int index = 0; index < 2; index++)
+        {
+            frameRgb[index] = new GpuSurface(this, w, h, true, inputFormat);
+            frameLow[index] = new GpuSurface(this, analysisWidth, analysisHeight, false);
+        }
         if (!predictive) EnsureOpticalFlow(w,h);
         if (HardwareOpticalFlowActive) frameSlowSynthesize = Shader(SlowSynthesizeCode.Value, 18);
         frameForward = new GpuSurface(this, flowWidth, flowHeight, false, 2); frameBackward = new GpuSurface(this, flowWidth, flowHeight, false, 2);
@@ -203,7 +212,11 @@ internal sealed unsafe partial class D3DPreview
     public void RenderCachedFrame(double sharpness, PreviewUpscaler upscaler)
     {
         if (!HasInterpolationFrame) throw new InvalidOperationException("No cached source frame.");
-        long start = Stopwatch.GetTimestamp(); RenderSource(new(frameRgb[frameCurrent]!.View, null, frameWidth, frameHeight,ContentRevision:frameRgbRevision[frameCurrent]), sharpness, upscaler); LastUploadDrawMs = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+        long start = Stopwatch.GetTimestamp();
+        var source = frameRgb[frameCurrent]!;
+        RenderSource(new(source.View, null, frameWidth, frameHeight, ContentRevision: frameRgbRevision[frameCurrent],
+            RtxInput: predictiveSurfaces ? source.Texture : null), sharpness, upscaler);
+        LastUploadDrawMs = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
     }
     public PresentedFrame RenderMidpoint(double sharpness, PreviewUpscaler upscaler) => RenderIntermediate(1, 2, sharpness, upscaler);
     public PresentedFrame RenderIntermediate(int step, int multiplier, double sharpness, PreviewUpscaler upscaler)

@@ -32,7 +32,7 @@ Loaded AI features are reused when target dimensions change. Byte-identical reta
 
 **Output → Sync preview to display** is on by default. The preview synchronizes presentation to the monitor's vertical refresh with a one-frame DXGI queue. With frame generation off or set to Gap recovery, the preview can also hold an early frame for up to 2 ms when the display refresh is at least twice the capture rate. Fullscreen can hold an early frame for up to one refresh interval, capped at 6 ms, to align it to the display when DXGI timing is available and the refresh rate closely matches a whole multiple of the capture rate. Late frames and irregular bursts skip the hold. Turn display sync off to prioritize the newest frame at the next available slot.
 
-Enable **Output → Steady fullscreen cadence** with display sync on and frame generation set to **Off** or **Gap recovery** to reduce delivery jitter. It works with matching rates such as 60 FPS at 120, 180 or 240 Hz. A frame that arrives early may wait up to 3 ms to absorb capture jitter. Late frames use the next available refresh, and mismatched rates use ordinary sync. Windows keeps its selected display mode.
+Enable **Output → Steady fullscreen cadence** with display sync on and frame generation set to **Off** or **Gap recovery** to reduce delivery jitter. It works with matching rates such as 60 FPS at 120, 180 or 240 Hz. A frame that arrives early may wait up to 3 ms to absorb capture jitter. The scheduler follows small, consistent shifts in capture timestamps to avoid adding that wait when the input clock is stable. Late frames use the next available refresh, and mismatched rates use ordinary sync. Windows keeps its selected display mode.
 
 Choose **Frame generation → Gap recovery · Late frames only** to fill isolated capture gaps. When a frame arrives late, the preview can use one predicted image from the last two real frames. A fresh capture takes priority. This mode supports up to 1080p input and needs display refresh of at least twice the capture rate. It skips prediction when motion is uncertain or a presentation slot is unavailable.
 
@@ -83,7 +83,7 @@ The Android helper uses zero added video buffering. With frame generation and di
 - Direct3D 11 display scaling and optional single-pass GPU sharpening. The render thread runs independently of the interface; the hidden preview pauses during fullscreen playback.
 - Event-driven WASAPI audio playback using the default shared-mode engine buffer and a bounded queue. No exclusive device lock.
 - Borderless fullscreen on the selected monitor, with aspect-preserving scaling. **Smooth jagged edges in fullscreen** is on by default and works at native size and with each upscaler.
-- Optional local MP4 recording with H.264 video and AAC audio; selectable 20/40/80/120 Mbps.
+- Optional local MP4 recording with H.264 video and AAC audio at the capture source frame rate, including fractional rates. Selectable 20/40/80/120 Mbps.
 - Match-input, 1080p, 1440p and 4K recording sizes, with aspect-preserving bicubic resizing.
 - Stereo audio meters, input-resolution PNG snapshots and a local recording folder selector.
 - Local preferences under `%LOCALAPPDATA%\XenoCapture\settings.json`. Inputs connect only after you click Play.
@@ -94,7 +94,7 @@ Standard preview uses the next available DXGI slot and selects the newest captur
 
 The app keeps at most one pending capture packet. Optional interpolation keeps two source images and one reusable generated image on the GPU. At 1080p the NVIDIA flow path uses about 29.4 MiB of additional image surfaces, excluding driver overhead. A 4× setting reuses these surfaces. Motion analysis has a processing-budget fallback. VSR adds GPU work and its own surfaces/model resources; combining it with high output rates can be more demanding.
 
-Video is SDR and 8-bit, with one video input and one mono or stereo audio input. Audio monitoring uses shared-mode WASAPI. Recording uses Windows H.264/AAC encoders, requesting hardware encoding when available. Encoder support for high resolutions/frame rates varies. Recording resizing uses the CPU; heavy settings may skip recording frames while preview remains independent. Audio/video timestamps use the host clock; device latency and long-session drift still need hardware validation.
+Video is SDR and 8-bit, with one video input and one mono or stereo audio input. Audio monitoring uses shared-mode WASAPI. Recording uses Windows H.264/AAC encoders, requesting hardware encoding when available. Encoder support for high resolutions/frame rates varies. Upscaling recordings to 1080p or larger uses GPU bicubic scaling when available, with a CPU fallback. Downscaling keeps the CPU prefilter. Heavy settings can skip recorded frames if the encoder falls behind. Audio/video timestamps use the host clock; device latency and long-session drift still need hardware validation.
 
 ## Build and diagnostics
 
@@ -111,6 +111,8 @@ Use `tools/Build-FrameShaders.ps1` to rebuild preview and compute bytecode after
 
 Synthetic diagnostics do not open a camera/capture card or record a microphone:
 
+- `XenoCapture.exe --card-test "<capture card name>" <folder> --motion-timing --fullscreen-ultra --recover-gaps` measures 12 seconds of live HDMI arrival timing, motion counts and fullscreen presentation on the highest-resolution display. It saves only aggregate counts and timings.
+- `XenoCapture.exe --recording-tests <folder>`: source-rate MP4 output, fractional rates, 1440p resize throughput, and GPU color and aspect-ratio checks. Add `--fullscreen` to compare recording with GPU and CPU resizing alongside synthetic 4K Ultra fullscreen playback.
 - `XenoCapture.exe --ai-video-tests <folder>`: explicit output sizes, quality, exact-frame cache, native/range/fallback, recording independence and six AI fullscreen round trips.
 - `XenoCapture.exe --presentation-tests <folder>`: synthetic preview pacing, DXGI display refresh gaps when available, and fullscreen transitions.
 - `XenoCapture.exe --self-test <folder>`: complete encoding, audio, GPU, UI and lifecycle suite.

@@ -145,6 +145,7 @@ internal static class AiVideoDiagnostics
         Stage("AI direct generated input");
         renderer.AiVideo = AiVideoSettings.Off;
         checks["aiGeneratedDirectInput"] = CheckDirectGeneratedInput(renderer);
+        checks["aiCachedPredictionDirectInput"] = CheckDirectPredictionInput(renderer);
         Stage("fallback and retry");renderer.AiVideo=AiVideoSettings.Off;renderer.Draw(frame,0);var fallback=renderer.Readback();renderer.ForceRtxVideoUnavailable=true;
         renderer.AiVideo=new(true,1440,3);renderer.Draw(frame,0);
         Require(!renderer.AiVideoActive&&renderer.AiVideoFallbackReason!=null&&renderer.RtxVideoSurfaceBytes==0&&fallback.AsSpan().SequenceEqual(renderer.Readback()),"AI failure did not preserve the existing Standard output.");
@@ -346,6 +347,30 @@ internal static class AiVideoDiagnostics
         renderer.AiVideo = AiVideoSettings.Off;
         renderer.ResetInterpolation();
         renderer.DisableFrameBudgetForDiagnostics = false;
+        return "pixel identical";
+    }
+
+    static object CheckDirectPredictionInput(D3DPreview renderer)
+    {
+        using var frame = FrameGenerationDiagnostics.Pattern(16);
+        frame.Time = 1_000_000;
+        renderer.AiVideo = new(true, 720, 4);
+        renderer.DisableVsrDirectInputForDiagnostics = true;
+        Require(renderer.CachePredictionSource(frame, frame.Duration, false), "The AI prediction fixture failed to cache.");
+        renderer.RenderCachedFrame(0, PreviewUpscaler.Standard);
+        byte[] converted = renderer.ReadbackAiVideo();
+
+        frame.Time += frame.Duration;
+        renderer.DisableVsrDirectInputForDiagnostics = false;
+        Require(renderer.CachePredictionSource(frame, frame.Duration, false), "The second AI prediction fixture failed to cache.");
+        long directInputs = renderer.VsrDirectInputs;
+        renderer.RenderCachedFrame(0, PreviewUpscaler.Standard);
+        byte[] direct = renderer.ReadbackAiVideo();
+        Require(renderer.VsrDirectInputs == directInputs + 1 && converted.AsSpan().SequenceEqual(direct),
+            "Using the cached prediction texture changed the AI output or bypassed the model.");
+
+        renderer.AiVideo = AiVideoSettings.Off;
+        renderer.ResetInterpolation();
         return "pixel identical";
     }
 

@@ -328,10 +328,29 @@ internal sealed partial class Direct3DHost
                 : Math.Clamp((long)(predictionDrawMs * 10_000) + 2_500, 2_500, Math.Min(15_000, interval / 4));
             if (now < due - lead) { deadline!.WaitUntil(due - lead); return true; }
             predictionReady ??= Renderer.PredictionReady();
-            long retryAt = recoveringGaps ? Math.Min(expires, due + 20_000) : due;
-            if (predictionReady == null && Clock.Now < retryAt) { deadline!.WaitUntil(retryAt); return true; }
+            long retryAt = recoveringGaps ? Math.Min(expires, due + 45_000) : due;
+            long checkedAt = Clock.Now;
+            if (predictionReady == null && checkedAt < retryAt)
+            {
+                // Retry during a missing capture without waiting out the entire buffer.
+                deadline!.WaitUntil(Math.Min(retryAt, checkedAt + 7_500));
+                return true;
+            }
+            if (predictionReady != true)
+            {
+                predictionDue += interval;
+                return true;
+            }
+            if (!WaitForFrameSlot(expires))
+            {
+                // A stale source notification can interrupt DXGI readiness.
+                // Keep this recovery slot only while there is still time and no real frame.
+                if (!recoveringGaps || Clock.Now >= expires || !CanShowPrediction(requested))
+                    predictionDue += interval;
+                return true;
+            }
             predictionDue += interval;
-            if (predictionReady != true || !WaitForFrameSlot(expires) || Clock.Now > expires || !CanShowPrediction(requested)) return true;
+            if (Clock.Now > expires || !CanShowPrediction(requested)) return true;
 
             PrepareDraw();
             if (Clock.Now > expires || !CanShowPrediction(requested)) return true;

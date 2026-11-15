@@ -12,7 +12,7 @@ internal static class PresentationDiagnostics
 {
     public static async Task<Dictionary<string, object>> Run(CaptureDevice? device = null, VideoMode? mode = null,
         Action<string>? progress = null, System.Drawing.Rectangle? fullscreenBounds = null,
-        FrameGenerationMode frameGeneration = FrameGenerationMode.Off)
+        FrameGenerationMode frameGeneration = FrameGenerationMode.Off, bool measureMotion = false)
     {
         using var host = new Direct3DHost(isFullscreen: fullscreenBounds.HasValue) { Active = true, Sharpness = 0.25 };
         if (fullscreenBounds.HasValue)
@@ -31,11 +31,13 @@ internal static class PresentationDiagnostics
         long displayed = 0; Exception? failure = null;
         var intervals = new List<double>(); var transit = new List<double>(); var sync = new object();
         long previous = 0; bool measure = false;
+        var motion = measureMotion ? new HdmiMotionTiming() : null;
         var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         host.Failed += ex => { failure = ex; first.TrySetException(ex); };
         host.FramePresented += frame =>
         {
             Interlocked.Increment(ref displayed); first.TrySetResult();
+            motion?.Presented(frame);
             lock (sync)
             {
                 if (measure)
@@ -52,7 +54,12 @@ internal static class PresentationDiagnostics
         if (capture != null)
         {
             capture.Progress += step => progress?.Invoke(step);
-            capture.Data += frame => { Interlocked.Increment(ref submitted); host.Submit(frame); };
+            capture.Data += frame =>
+            {
+                Interlocked.Increment(ref submitted);
+                motion?.Capture(frame);
+                host.Submit(frame);
+            };
             capture.Failed += ex => { failure = ex; first.TrySetException(ex); };
         }
         using var cancel = new CancellationTokenSource();
@@ -74,6 +81,16 @@ internal static class PresentationDiagnostics
         {
             progress?.Invoke("starting capture"); if (capture != null) await capture.Start(); progress?.Invoke("waiting for first frame");
             await first.Task.WaitAsync(TimeSpan.FromSeconds(8)); progress?.Invoke("presenting frames"); await Task.Delay(250);
+            if (motion != null)
+            {
+                progress?.Invoke("measuring HDMI motion and frame timing");
+                motion.Start();
+                await Task.Delay(12_000);
+                if (failure != null) throw failure;
+                if (fullscreenBounds.HasValue && !host.AiVideoActive)
+                    throw new InvalidOperationException(host.AiVideoFallbackReason ?? "4K Ultra AI was inactive.");
+                return motion.Finish(host, capture?.Layout, fullscreenBounds);
+            }
             lock (sync) measure = true;
             long initial = Interlocked.Read(ref displayed), inputInitial = Interlocked.Read(ref submitted);
             long initialGenerated = host.GeneratedPresentations;

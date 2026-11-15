@@ -24,6 +24,23 @@ internal sealed record VideoMode(uint Index, int Width, int Height, int Numerato
         return $"{Width} × {Height}  ·  {Fps:0.##} fps  ·  {format}";
     }
 }
+internal readonly record struct VideoFrameRate(int Numerator, int Denominator)
+{
+    internal bool IsValid => Numerator > 0 && Denominator > 0 && Numerator <= 10_000_000L * Denominator;
+    internal double FramesPerSecond => (double)Numerator / Denominator;
+    internal long Duration => 10_000_000L * Denominator / Numerator;
+
+    internal static VideoFrameRate FromDuration(long duration)
+    {
+        if (duration <= 0) return default;
+        int whole = (int)Math.Round(10_000_000.0 / duration);
+        if (whole > 0 && Math.Abs(10_000_000.0 / whole - duration) < 1)
+            return new(whole, 1);
+        return Native.MFAverageTimePerFrameToFrameRate((ulong)duration, out int numerator, out int denominator) >= 0
+            ? new(numerator, denominator) : default;
+    }
+}
+
 internal enum PixelLayout { Bgr32, Nv12 }
 internal sealed class Packet : IDisposable
 {
@@ -64,6 +81,7 @@ internal sealed class Packet : IDisposable
     public int Length { get; }
     public long Time { get; set; }
     public long Duration { get; set; }
+    internal VideoFrameRate VideoRate { get; set; }
     public bool Audio { get; }
     public int Width { get; }
     public int Height { get; }
@@ -75,7 +93,8 @@ internal sealed class Packet : IDisposable
     Packet(Packet source)
     {
         storage = source.storage; Layout = source.Layout; Length = source.Length; Audio = source.Audio; Width = source.Width; Height = source.Height;
-        Time = source.Time; Duration = source.Duration; FullRange = source.FullRange; Bt601 = source.Bt601;
+        Time = source.Time; Duration = source.Duration; VideoRate = source.VideoRate;
+        FullRange = source.FullRange; Bt601 = source.Bt601;
     }
     internal bool IsExactVideoRepeatOf(Packet? previous)
     {

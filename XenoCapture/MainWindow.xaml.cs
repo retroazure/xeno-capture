@@ -105,7 +105,8 @@ public partial class MainWindow : Window
         "Generation adds one content frame of buffering and can create interpolation artifacts. Input is limited " +
         "to 1080p. The FPS display reports presented, actually generated, and input frames separately; static or " +
         "uncertain frames use fallback. Recording remains at the captured source rate. MP4 output uses its " +
-        "separate resolution settings and high-quality bicubic resizing on the CPU.\n\n" +
+        "the capture source frame rate, separate resolution settings and bicubic resizing. Upscaling to 1080p " +
+        "or larger uses the GPU when available, with a CPU fallback.\n\n" +
         "Recordings use Windows H.264 / AAC encoders. Hardware encoding is requested when available; GPU use is " +
         "not guaranteed. 1440p / 4K support depends on the installed encoder. Heavy output settings can skip " +
         "recording frames without blocking the preview.\n\n" +

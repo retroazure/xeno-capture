@@ -86,6 +86,13 @@ public partial class MainWindow
     }
     internal Task DiagnosticWindowed() => fullscreen?.CloseAsync() ?? Task.CompletedTask;
     internal Task DiagnosticDisconnect() => Disconnect();
+    bool diagnosticCpuRecordingResize;
+    internal void DiagnosticRecordingSettings(int resolution, int bitrate, bool useCpu)
+    {
+        OutputResolution.SelectedIndex = resolution;
+        Bitrate.SelectedIndex = bitrate;
+        diagnosticCpuRecordingResize = useCpu;
+    }
     internal Task DiagnosticRecord(string directory) { folder = directory; return StartOrStopRecording(); }
     internal Task DiagnosticClose()
     {

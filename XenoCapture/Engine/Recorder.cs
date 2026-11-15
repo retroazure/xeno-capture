@@ -26,6 +26,7 @@ internal sealed class Recorder
     long videoSamples;
     public long VideoSamplesWritten => Interlocked.Read(ref videoSamples);
     public long DroppedFrames { get; private set; }
+    internal bool UseCpuResizeForDiagnostics { get; init; }
     public event Action<Exception>? Failed;
     public Recorder(RecordingOptions options, long? origin = null) { this.options = options; this.origin = origin ?? Clock.Now; }
     public Task Start()
@@ -85,7 +86,8 @@ internal sealed class Recorder
                 using var pcm = AudioType(false); Native.SetInput(writer, aus, pcm);
             }
             Native.Hr(writer.Call(5)); ready.TrySetResult();
-            using var scaler = options.Width != options.SourceWidth || options.Height != options.SourceHeight ? new VideoScaler(options) : null;
+            using var scaler = options.Width != options.SourceWidth || options.Height != options.SourceHeight
+                ? new RecordingResize(options, UseCpuResizeForDiagnostics) : null;
             long lastVideo = -1, lastAudio = -1;
             while (true)
             {
@@ -115,10 +117,8 @@ internal sealed class Recorder
                             sampleTime = Math.Max(sampleTime, lastVideo + 1);
                             lastVideo = sampleTime;
                         }
-                        using var converted = !packet.Audio && scaler != null && packet.Layout == PixelLayout.Nv12
-                            ? PixelConversion.ToBgra(packet) : null;
-                        var bytes = packet.Audio || scaler == null
-                            ? packet.Bytes.AsSpan(0, packet.Length) : scaler.Resize(converted ?? packet);
+                        ReadOnlySpan<byte> bytes = packet.Audio || scaler == null
+                            ? packet.Bytes.AsSpan(0, packet.Length) : scaler.Resize(packet);
                         using var sample = Native.Sample(bytes, sampleTime, packet.Duration);
                         Native.Write(writer, packet.Audio ? aus : vs, sample);
                         if (!packet.Audio) Interlocked.Increment(ref videoSamples);

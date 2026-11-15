@@ -15,4 +15,6 @@ foreach ($shader in @(
     & $Compiler /nologo /T $shader.Profile /E $shader.Entry /O3 @defines /Fo (Join-Path $shaderDirectory ($shader.Name + '.cso')) (Join-Path $shaderDirectory 'Preview.hlsl')
     if ($LASTEXITCODE -ne 0) { throw ('Shader compilation failed: ' + $shader.Name) }
 }
+& $Compiler /nologo /T ps_4_0 /E Scale /O3 /Fo (Join-Path $shaderDirectory 'RecordingScale.cso') (Join-Path $shaderDirectory 'RecordingScale.hlsl')
+if ($LASTEXITCODE -ne 0) { throw 'Recording scale shader compilation failed.' }
 Get-ChildItem -LiteralPath $shaderDirectory -File | Where-Object Name -ne 'SHA256SUMS.txt' | ForEach-Object { $_.Name + ' ' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash } | Set-Content -LiteralPath (Join-Path $shaderDirectory 'SHA256SUMS.txt')

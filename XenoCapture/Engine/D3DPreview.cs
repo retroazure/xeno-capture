@@ -202,9 +202,12 @@ internal sealed unsafe partial class D3DPreview : IDisposable
     {
         if (aiPixelShaderBound == aiResampling) return;
         var shader = aiResampling ? aiPixelShader ??= Shader(AiPixelBytecode.Value, 15) : pixelShader!;
-        ((delegate* unmanaged[Stdcall]<nint, nint, nint, uint, void>)context.Slot(9))(context.P, shader.P, 0, 0);
+        BindPixelShader(shader);
         aiPixelShaderBound = aiResampling;
     }
+    void BindPixelShader(Com shader) =>
+        ((delegate* unmanaged[Stdcall]<nint, nint, nint, uint, void>)context.Slot(9))(context.P, shader.P, 0, 0);
+
     void Upload(Com texture, byte* source, int pitch, int rows)
     {
         Mapped map;
@@ -399,7 +402,7 @@ internal sealed unsafe partial class D3DPreview : IDisposable
         DrawPrepared(output, FittedViewport(output.SourceWidth, output.SourceHeight, dock), docking: dock.HasValue);
     }
 
-    void DrawPrepared(PreparedOutput output, Viewport viewport, bool docking = false)
+    void DrawPrepared(PreparedOutput output, Viewport viewport, bool docking = false, Com? pixelOverride = null)
     {
         var parameters = output.Parameters;
         if (EdgeSmoothing && output.UsePreviewFilters)
@@ -444,7 +447,7 @@ internal sealed unsafe partial class D3DPreview : IDisposable
             }
         }
         bool aiFilters = output.AiResampling && (parameters.EdgeStepX > 0 || parameters.Sharpness > .001f);
-        SetPreviewPixelShader(parameters.AiFootprintX > 0 || aiFilters);
+        if (pixelOverride == null) SetPreviewPixelShader(parameters.AiFootprintX > 0 || aiFilters);
         SetGraphicsParameters(parameters);
         // Each flip-discard buffer must be cleared where the video leaves a border.
         if (docking || transitioning || (long)width * output.SourceHeight != (long)height * output.SourceWidth)
@@ -457,7 +460,9 @@ internal sealed unsafe partial class D3DPreview : IDisposable
         }
 
         ((delegate* unmanaged[Stdcall]<nint, uint, Viewport*, void>)context.Slot(SetViewportsSlot))(context.P, 1, &viewport);
+        if (pixelOverride != null) BindPixelShader(pixelOverride);
         ((delegate* unmanaged[Stdcall]<nint, uint, uint, void>)context.Slot(DrawSlot))(context.P, 3, 0);
+        if (pixelOverride != null) BindPixelShader(aiPixelShaderBound ? aiPixelShader! : pixelShader!);
     }
     public bool Present(bool allowBlocking, uint syncInterval)
     {

@@ -32,6 +32,7 @@
     <EmbeddedResource Include="Shaders\PreviewVertex.cso" LogicalName="XenoCapture.Preview.Vertex" />
     <EmbeddedResource Include="Shaders\PreviewPixel.cso" LogicalName="XenoCapture.Preview.Pixel" />
     <EmbeddedResource Include="Shaders\PreviewAiPixel.cso" LogicalName="XenoCapture.Preview.AiPixel" />
+    <EmbeddedResource Include="Shaders\RecordingScale.cso" LogicalName="XenoCapture.Recording.Scale" />
     <EmbeddedResource Include="Shaders\FrameDownsample.cso" LogicalName="XenoCapture.Frame.Downsample" />
     <EmbeddedResource Include="Shaders\FrameCompare.cso" LogicalName="XenoCapture.Frame.Compare" />
     <EmbeddedResource Include="Shaders\FrameMotion.cso" LogicalName="XenoCapture.Frame.Motion" />

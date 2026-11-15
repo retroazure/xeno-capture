@@ -19,6 +19,7 @@ internal sealed unsafe class Com(nint pointer) : IDisposable
     public uint Get32(Guid key, uint fallback = 0) { uint v; return ((delegate* unmanaged[Stdcall]<nint, Guid*, uint*, int>)Slot(7))(P, &key, &v) < 0 ? fallback : v; }
     public void U64(Guid key, ulong value) => Native.Hr(((delegate* unmanaged[Stdcall]<nint, Guid*, ulong, int>)Slot(22))(P, &key, value));
     public ulong U64(Guid key) { ulong v; Native.Hr(((delegate* unmanaged[Stdcall]<nint, Guid*, ulong*, int>)Slot(8))(P, &key, &v)); return v; }
+    public ulong Get64(Guid key) { ulong v; return ((delegate* unmanaged[Stdcall]<nint, Guid*, ulong*, int>)Slot(8))(P, &key, &v) < 0 ? 0 : v; }
     public void Guid(Guid key, Guid value) => Native.Hr(((delegate* unmanaged[Stdcall]<nint, Guid*, Guid*, int>)Slot(24))(P, &key, &value));
     public Guid Guid(Guid key) { Guid v; Native.Hr(((delegate* unmanaged[Stdcall]<nint, Guid*, Guid*, int>)Slot(10))(P, &key, &v)); return v; }
     public void SetUnknown(Guid key, nint value) => Native.Hr(((delegate* unmanaged[Stdcall]<nint, Guid*, nint, int>)Slot(27))(P, &key, value));
@@ -47,6 +48,8 @@ internal static unsafe class Native
 {
     [DllImport("mfplat.dll", ExactSpelling = true)] public static extern int MFStartup(uint version, uint flags);
     [DllImport("mfplat.dll", ExactSpelling = true)] public static extern int MFShutdown();
+    [DllImport("mfplat.dll", ExactSpelling = true), DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    internal static extern int MFAverageTimePerFrameToFrameRate(ulong duration, out int numerator, out int denominator);
     [DllImport("mfplat.dll", ExactSpelling = true)] static extern int MFCreateAttributes(out nint attributes, uint count);
     [DllImport("mfplat.dll", ExactSpelling = true)] static extern int MFCreateMediaType(out nint mediaType);
     [DllImport("mfplat.dll", ExactSpelling = true)] static extern int MFCreateSample(out nint sample);

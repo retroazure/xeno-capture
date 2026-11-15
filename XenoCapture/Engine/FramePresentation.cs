@@ -60,7 +60,7 @@ internal readonly record struct SourceFramePacing(long Time, long Duration, long
 
 internal struct FullscreenSourceCadence
 {
-    long previousTime, previousDuration, expectedArrival;
+    long previousTime, previousDuration, previousGap, expectedArrival;
     long pendingLatePhase, earlyArrivalPhase;
     int latePhaseAge, earlyPhaseSamples;
 
@@ -79,9 +79,14 @@ internal struct FullscreenSourceCadence
         long gap = time - previousTime;
         bool continuous = previousDuration != 0 && gap >= duration * 3 / 4 && gap <= duration * 5 / 4
             && Math.Abs(previousDuration - duration) <= duration / 32;
+        // Some capture clocks have a steady step close to their advertised rate.
+        // Keep the nominal step for jitter, bursts and discontinuities.
+        long step = continuous && Math.Abs(gap - duration) <= duration / 16
+            && Math.Abs(gap - previousGap) <= duration / 128 ? gap : duration;
         previousTime = time;
         previousDuration = duration;
-        long expected = expectedArrival + duration;
+        previousGap = gap;
+        long expected = expectedArrival + step;
         long error = arrival - expected;
         if (!continuous || error < -duration / 2 || error > duration)
         {

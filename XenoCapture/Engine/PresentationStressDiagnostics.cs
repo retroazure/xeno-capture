@@ -365,8 +365,23 @@ internal static class PresentationStressDiagnostics
                 || cadence.Deadline(baseTime + 71 * period, period, shifted + period, hz) != shifted + period
                 || cadence.Deadline(baseTime + 72 * period, period, shifted + 2 * period, hz) != shifted + 2 * period)
                 throw new InvalidOperationException("Steady pacing did not catch up to a changed delivery phase.");
+            // This capture clock advances in 16 ms steps and occasionally
+            // skips one step to maintain 60 frames per second on average.
+            const long deviceStep = 160_000;
+            long maximumDeviceHold = 0;
+            cadence = default;
+            for (int i = 0; i < 240; i++)
+            {
+                if (i % 25 == 24) continue;
+                long time = baseTime + i * deviceStep, arrival = time + lag;
+                maximumDeviceHold = Math.Max(maximumDeviceHold, cadence.Deadline(time, period, arrival, hz) - arrival);
+            }
+            if (maximumDeviceHold > 7_500)
+                throw new InvalidOperationException("Steady pacing added a hold to a stable, quantized capture clock.");
+
             cases.Add(new { hz, maximumScheduledGapErrorMs = maxDeviation / 10000.0,
-                maximumHoldMs = maxHold / 10000.0, settledHoldMs = settledHold / 10000.0 });
+                maximumHoldMs = maxHold / 10000.0, settledHoldMs = settledHold / 10000.0,
+                maximumDeviceClockHoldMs = maximumDeviceHold / 10000.0 });
         }
         return cases;
     }
@@ -382,8 +397,9 @@ internal static class PresentationStressDiagnostics
         long arrivalSpike = steadyOnly && Array.IndexOf(args, "--steady-pacing-short-spikes") >= 0 ? 52_000
             : steadyOnly && Array.IndexOf(args, "--steady-pacing-spikes") >= 0 ? 95_000 : 0;
         bool settle = steadyOnly && Array.IndexOf(args, "--steady-pacing-settle") >= 0;
-        var source = new PacedVideoBackend(1920, 1080, arrivalJitter, pan: aiMotion || steadyOnly,
-            arrivalSpike: arrivalSpike, settle: settle);
+        bool deviceClock = steadyOnly && Array.IndexOf(args, "--steady-device-clock") >= 0;
+        var source = new PacedVideoBackend(1920, 1080, deviceClock ? 0 : arrivalJitter, pan: aiMotion || steadyOnly,
+            arrivalSpike: arrivalSpike, settle: settle, deviceClock: deviceClock);
         var main = new MainWindow(false, false, (_, _) => new CaptureStream(() => source, TimeSpan.FromSeconds(2)))
             { ShowActivated = false };
         main.Show();
@@ -549,7 +565,8 @@ internal static class PresentationStressDiagnostics
                 }
                 return new()
                 {
-                    ["displays"] = displays, ["injectedAlternateDelayMs"] = arrivalJitter / 10000.0,
+                    ["displays"] = displays, ["injectedAlternateDelayMs"] = deviceClock ? 0 : arrivalJitter / 10000.0,
+                    ["reproducesDeviceClockGaps"] = deviceClock,
                     ["injectedSpikeMs"] = arrivalSpike / 10000.0, ["alternatesJitterWithStableDelivery"] = settle,
                     ["recoverGaps"] = recoveringGaps, ["measuresPhysicalPixelResponse"] = false
                 };
@@ -622,8 +639,8 @@ internal static class PresentationStressDiagnostics
         }
     }
 
-    sealed class PacedVideoBackend(int width, int height, long arrivalJitter = 0, bool pan = false, long arrivalSpike = 0,
-        bool settle = false) : ICaptureBackend
+    internal sealed class PacedVideoBackend(int width, int height, long arrivalJitter = 0, bool pan = false, long arrivalSpike = 0,
+        bool settle = false, bool deviceClock = false) : ICaptureBackend
     {
         const int SpikeInterval = 60, SettlingBlock = 120;
         const long Period = 166_667;
@@ -662,7 +679,9 @@ internal static class PresentationStressDiagnostics
         public Packet? Read()
         {
             long index = Frames;
-            long timestamp = arrivalJitter == 0 ? next : origin + index * Period;
+            // 24 delivered frames for every 25 ticks of the 16 ms device clock.
+            long timestamp = deviceClock ? origin + (index + index / 24) * 160_000
+                : arrivalJitter == 0 ? next : origin + index * Period;
             long extra = index % 2 == 1 && (!settle || !InStableBlock(index)) ? arrivalJitter : 0;
             if (index % SpikeInterval == 0) extra += arrivalSpike;
             long delay = timestamp + extra - Clock.Now;
@@ -678,7 +697,7 @@ internal static class PresentationStressDiagnostics
             long now = Clock.Now; next = Math.Max(next + Period, now);
             if (previous != 0) intervals.Add((now - previous) / 10000.0); previous = now;
             index = Interlocked.Increment(ref frames);
-            var frame = new Packet(width * height * 3 / 2, false, width, height, PixelLayout.Nv12) { Time = arrivalJitter == 0 ? now : timestamp, Duration = Period };
+            var frame = new Packet(width * height * 3 / 2, false, width, height, PixelLayout.Nv12) { Time = arrivalJitter == 0 && !deviceClock ? now : timestamp, Duration = Period };
             if (panPattern is { } pattern)
             {
                 int shift = (int)(index * 19 % width);

@@ -20,8 +20,18 @@ public partial class MainWindow
         if (busy || !Connected || phoneWindowPreview) return;
         if (recorder != null) { await StopRecording(); return; }
         int session = sessions.Generation;
-        int sourceWidth, sourceHeight; PixelLayout sourceLayout;
-        lock (frameGate) { sourceWidth = latest?.Width ?? 0; sourceHeight = latest?.Height ?? 0; sourceLayout = latest?.Layout ?? PixelLayout.Bgr32; }
+        int sourceWidth, sourceHeight;
+        long duration;
+        VideoFrameRate sourceRate;
+        PixelLayout sourceLayout;
+        lock (frameGate)
+        {
+            sourceWidth = latest?.Width ?? 0;
+            sourceHeight = latest?.Height ?? 0;
+            sourceLayout = latest?.Layout ?? PixelLayout.Bgr32;
+            sourceRate = latest?.VideoRate ?? default;
+            duration = latest?.Duration ?? 0;
+        }
         if (sourceWidth == 0) { SetStatus("Wait for the first video frame before recording.", true); return; }
         using var operation = BusyScope(); Recorder? starting = null;
         try
@@ -31,10 +41,15 @@ public partial class MainWindow
             int height = int.Parse((string)((ComboBoxItem)OutputResolution.SelectedItem).Tag, CultureInfo.InvariantCulture);
             int width = height switch { 1080 => 1920, 1440 => 2560, 2160 => 3840, _ => sourceWidth };
             if (height == 0) height = sourceHeight;
-            var mode = VideoModes.SelectedItem as VideoMode;
-            var options = new RecordingOptions(path, sourceWidth, sourceHeight, width, height, demo != null ? 30 : mode?.Numerator ?? 30, demo != null ? 1 : mode?.Denominator ?? 1,
+            if (!sourceRate.IsValid) sourceRate = VideoFrameRate.FromDuration(duration);
+            if (!sourceRate.IsValid)
+            {
+                var mode = VideoModes.SelectedItem as VideoMode;
+                sourceRate = new(mode?.Numerator ?? 30, mode?.Denominator ?? 1);
+            }
+            var options = new RecordingOptions(path, sourceWidth, sourceHeight, width, height, sourceRate.Numerator, sourceRate.Denominator,
                 int.Parse((string)((ComboBoxItem)Bitrate.SelectedItem).Tag, CultureInfo.InvariantCulture) * 1_000_000, demo != null ? 48000 : audio?.AudioRate ?? 0, demo != null ? 2 : audio?.AudioChannels ?? 0, sourceLayout);
-            var next = starting = new Recorder(options); lock (recorderGate) pendingRecorder = next; next.Failed += ex => ReportRecordingFailure(session, next, ex);
+            var next = starting = new Recorder(options) { UseCpuResizeForDiagnostics = diagnosticCpuRecordingResize }; lock (recorderGate) pendingRecorder = next; next.Failed += ex => ReportRecordingFailure(session, next, ex);
             if (discoverHardware) await interfaceSounds.SilenceAsync();
             if (!sessions.IsCurrent(session) || closing) { await next.Stop(); return; }
             try { await next.Start(); } catch { try { await next.Stop(); } catch { } throw; }
@@ -42,7 +57,7 @@ public partial class MainWindow
             lock (recorderGate) { recorder = next; pendingRecorder = null; }
             recordedAt = Clock.Now; lastRecording = path; RecordBadge.Visibility = Visibility.Visible;
             AnimateFeedback(RecordBadge);
-            SetStatus($"Recording {width} × {height} MP4 · H.264{(options.AudioRate > 0 ? " + AAC audio" : " · no audio input")}. Saved locally.");
+            SetStatus($"Recording {width} × {height} · {sourceRate.FramesPerSecond:0.##} fps · H.264 MP4{(options.AudioRate > 0 ? " + AAC audio" : " · no audio input")}. Saved locally.");
         }
         catch (Exception ex) { if (!closing && sessions.IsCurrent(session)) SetStatus("Recording could not start: " + FriendlyError(ex) + " Try Match input and a lower bitrate.", true); }
         finally { lock (recorderGate) { if (ReferenceEquals(pendingRecorder, starting)) pendingRecorder = null; } SetControls(); }
