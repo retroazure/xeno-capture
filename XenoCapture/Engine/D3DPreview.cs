@@ -19,6 +19,7 @@ internal sealed unsafe partial class D3DPreview : IDisposable
     { public uint Width, Height, Mips, ArraySize, Format, Samples, Quality, Usage, Bind, Cpu, Misc; }
     [StructLayout(LayoutKind.Sequential)] struct BufferDesc
     { public uint Size, Usage, Bind, Cpu, Misc, Structure; }
+    [StructLayout(LayoutKind.Sequential)] struct SubresourceData { public nint Data; public uint RowPitch, SlicePitch; }
     [StructLayout(LayoutKind.Sequential)] struct Mapped { public nint Data; public uint Pitch, Depth; }
     [StructLayout(LayoutKind.Sequential)] struct SamplerDesc
     { public uint Filter, U, V, W; public float Bias; public uint Anisotropy, Comparison; public float R, G, B, A, MinLod, MaxLod; }
@@ -49,6 +50,7 @@ internal sealed unsafe partial class D3DPreview : IDisposable
     readonly record struct ShaderParameters(float Width, float Height, float Sharpness, float Nv12, float FullRange, float Bt601, float EdgeStepX = 0, float EdgeStepY = 0,
         float AiFootprintX = 0, float AiFootprintY = 0, float AiReductionRatio = 0, float Padding = 0);
     ShaderParameters previousParameters;
+    readonly Com?[] conversionConstants = new Com?[5];
     bool parametersValid;long sourceContentRevision,imageUploadRevision;
     static readonly Lazy<byte[]> VertexBytecode = new(() => ShaderBytecode("Preview.Vertex"));
     static readonly Lazy<byte[]> PixelBytecode = new(() => ShaderBytecode("Preview.Pixel"));
@@ -521,6 +523,7 @@ internal sealed unsafe partial class D3DPreview : IDisposable
         chroma?.Dispose();
         imageView?.Dispose();
         image?.Dispose();
+        foreach (var buffer in conversionConstants) buffer?.Dispose();
         constants?.Dispose();
         sampler?.Dispose();
         aiPixelShader?.Dispose();

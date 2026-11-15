@@ -141,6 +141,7 @@ internal static class AiVideoDiagnostics
         }
         Stage("AI display resampling");
         checks["aiDisplayResampling"] = CheckDisplayResampling();
+        checks["aiFineDetail"] = CheckAiFineDetail();
         Stage("AI direct generated input");
         renderer.AiVideo = AiVideoSettings.Off;
         checks["aiGeneratedDirectInput"] = CheckDirectGeneratedInput(renderer);
@@ -171,6 +172,7 @@ internal static class AiVideoDiagnostics
             renderer.EdgeSmoothing = true;
             renderer.Draw(input, .25);
             byte[] preview = renderer.Readback();
+            long constantUploads = renderer.ConstantUploads;
             var redraw = new List<double>();
             var processed = new List<double>();
             for (int batch = 0; batch < 5; batch++)
@@ -187,6 +189,8 @@ internal static class AiVideoDiagnostics
                 processed.Add(timer.Elapsed.TotalMilliseconds / 24);
                 Require(renderer.VsrEvaluations - evaluations == 24, "The timed workload must process each frame.");
             }
+            long constantUpdates = renderer.ConstantUploads - constantUploads;
+            Require(constantUpdates == 0, "Steady AI processing uploaded unchanged conversion or preview parameters.");
             redraw.Sort();
             processed.Sort();
 
@@ -216,11 +220,60 @@ internal static class AiVideoDiagnostics
                 edgeMeanError = referenceError / (3.0 * edgePixels),
                 modelEdgeMeanError = modelError / (3.0 * edgePixels),
                 modelSha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(rawModel)),
+                constantUpdates,
                 redrawMedianMs = redraw[2],
                 processedMedianMs = processed[2]
             });
         }
         return results;
+    }
+
+    static object CheckAiFineDetail()
+    {
+        const int size = 32, middle = size / 2;
+        using var frame = new Packet(size * size * 4, false, size, size);
+        using var renderer = new D3DPreview(0, size, size) { DiagnosticAiResampling = true };
+        int center = (middle * size + middle) * 4;
+
+        Array.Fill(frame.Bytes, (byte)32, 0, frame.Length);
+        Paint(middle, middle, 204, 204, 204);
+        Paint(middle, middle - 1, 10, 10, 10);
+        Paint(middle - 1, middle, 10, 10, 10);
+        Paint(middle, middle + 1, 110, 110, 110);
+        Paint(middle + 1, middle, 110, 110, 110);
+        renderer.EdgeSmoothing = true;
+        renderer.Draw(frame, 0);
+        int brightDetail = renderer.Readback()[center];
+        Require(Math.Abs(brightDetail - 204) <= 1, "AI anti-aliasing faded a thin highlight.");
+
+        // A true diagonal has a center inside the surrounding luma interval.
+        // Its off-axis samples should still soften the step.
+        Paint(middle, middle, 100, 100, 100);
+        renderer.Draw(frame, 0);
+        int smoothedEdge = renderer.Readback()[center];
+        Require(smoothedEdge < 95, "AI anti-aliasing no longer smooths diagonal edges.");
+
+        Array.Fill(frame.Bytes, (byte)32, 0, frame.Length);
+        Paint(middle, middle, 255, 30, 25);
+        Paint(middle, middle - 1, 177, 24, 15);
+        Paint(middle, middle + 1, 255, 60, 45);
+        Paint(middle + 1, middle, 177, 24, 15);
+        Paint(middle - 1, middle, 177, 24, 15);
+        renderer.EdgeSmoothing = false;
+        renderer.Draw(frame, 1);
+        byte[] pixels = renderer.Readback();
+        Require(pixels[center + 2] == 255 && Math.Abs(pixels[center + 1] - 30) <= 1
+            && Math.Abs(pixels[center] - 25) <= 1, "AI sharpening clipped a color channel.");
+        return new { brightDetail, smoothedEdge, saturatedGreen = pixels[center + 1] };
+
+        void Paint(int x, int y, byte red, byte green, byte blue)
+        {
+            int index = (y * size + x) * 4;
+            frame.Bytes[index] = blue;
+            frame.Bytes[index + 1] = green;
+            frame.Bytes[index + 2] = red;
+            frame.Bytes[index + 3] = 255;
+        }
     }
 
     static object CheckDisplayResampling()

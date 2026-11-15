@@ -121,7 +121,7 @@ internal sealed unsafe partial class D3DPreview
     {
         ClearPixelInputs(); ClearComputeBindings();
         SetPreviewPixelShader(aiResampling: false);
-        SetGraphicsParameters(new(source.Width, source.Height, 0, source.Layout == PixelLayout.Nv12 ? 1 : 0, source.FullRange ? 1 : 0, source.Bt601 ? 1 : 0));
+        BindConversionConstants(source);
         nint* input = stackalloc nint[2];
         input[0] = source.Color.P;
         input[1] = source.Chroma?.P ?? 0;
@@ -133,7 +133,36 @@ internal sealed unsafe partial class D3DPreview
         ((delegate* unmanaged[Stdcall]<nint, uint, uint, void>)context.Slot(DrawSlot))(context.P, 3, 0);
         UnbindRenderTarget();
         ClearPixelInputs();
+        BindPreviewConstants(constants!);
     }
+
+    void BindConversionConstants(ImageSource source)
+    {
+        // The plain conversion shader reads only the layout and NV12 color flags.
+        // Cache RGB and the four NV12 variants independently of size or filters.
+        bool nv12 = source.Layout == PixelLayout.Nv12;
+        int index = nv12 ? 1 + (source.FullRange ? 1 : 0) + (source.Bt601 ? 2 : 0) : 0;
+        if (conversionConstants[index] is not { } buffer)
+        {
+            var parameters = new ShaderParameters(0, 0, 0, nv12 ? 1 : 0,
+                nv12 && source.FullRange ? 1 : 0, nv12 && source.Bt601 ? 1 : 0);
+            var description = new BufferDesc { Size = (uint)sizeof(ShaderParameters), Usage = 1, Bind = 4 };
+            var initialData = new SubresourceData { Data = (nint)(&parameters) };
+            nint pointer;
+            Native.Hr(((delegate* unmanaged[Stdcall]<nint, BufferDesc*, SubresourceData*, nint*, int>)device.Slot(3))
+                (device.P, &description, &initialData, &pointer));
+            buffer = conversionConstants[index] = new Com(pointer);
+            ConstantUploads++;
+        }
+        BindPreviewConstants(buffer);
+    }
+
+    void BindPreviewConstants(Com buffer)
+    {
+        nint pointer = buffer.P;
+        ((delegate* unmanaged[Stdcall]<nint, uint, uint, nint*, void>)context.Slot(16))(context.P, 0, 1, &pointer);
+    }
+
     Com UpscaleNis(ImageSource sourceImage, int outputWidth, int outputHeight, double sharpness)
     {
         EnsureNis();

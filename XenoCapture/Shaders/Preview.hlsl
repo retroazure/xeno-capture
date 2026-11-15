@@ -61,28 +61,38 @@ float3 filterAi(float2 uv, float3 center) {
   luma(image.SampleLevel(linearClamp, uv, 0, int2(1, 0)).rgb),
   luma(image.SampleLevel(linearClamp, uv, 0, int2(-1,0)).rgb));
  float y = luma(center);
- float low = min(y, min(min(neighbors.x, neighbors.y), min(neighbors.z, neighbors.w)));
- float high = max(y, max(max(neighbors.x, neighbors.y), max(neighbors.z, neighbors.w)));
+ float neighborLow = min(min(neighbors.x, neighbors.y), min(neighbors.z, neighbors.w));
+ float neighborHigh = max(max(neighbors.x, neighbors.y), max(neighbors.z, neighbors.w));
+ float low = min(y, neighborLow), high = max(y, neighborHigh);
  float range = high - low;
  float2 gradient = float2(neighbors.z - neighbors.w, neighbors.y - neighbors.x);
  float diagonal = min(abs(gradient.x), abs(gradient.y));
  float reduction = max(1, max(aiFootprint.x, aiFootprint.y));
+ // Local peaks such as thin lines and HUD glyphs can look diagonal
+ // to the gradient detector. Preserve them when the center stands out.
+ float outside = max(neighborLow - y, y - neighborHigh);
  float edgeBlend = 0;
- [branch] if (flags.z > 0 && diagonal > max(.035, range * .20)) {
+ [branch] if (flags.z > 0 && outside < .05 && diagonal > max(.035, range * .20)) {
   float2 tangent = float2(-gradient.y, gradient.x) / max(abs(gradient.x), abs(gradient.y));
   float2 step = tangent / p.xy;
-  edgeBlend = .32 * smoothstep(.035, .16, diagonal) / reduction;
+  float edgeConfidence = 1 - smoothstep(.012, .05, outside);
+  edgeBlend = .32 * edgeConfidence * smoothstep(.035, .16, diagonal) / reduction;
   center = lerp(center, (aiTap(uv - step) + aiTap(uv + step)) * .5, edgeBlend);
  }
 
  // Sharpen luma within the measured neighborhood so dark and bright
  // outlines cannot overshoot the values already in the AI output.
- float filtered = luma(center);
- // Leave strong edges from the model intact. Spend the sharpening range
- // on lower-contrast texture, where an outline would be less visible.
- float strength = p.z * (1 - smoothstep(.08, .30, range)) * (1 - edgeBlend) / reduction;
- float correction = (filtered - dot(neighbors, .25)) * strength;
- return saturate(center + clamp(correction, min(0, low - filtered), max(0, high - filtered)));
+ [branch] if (p.z > .001) {
+  float filtered = luma(center);
+  float strength = p.z * (1 - smoothstep(.08, .30, range)) * (1 - edgeBlend) / reduction;
+  float correction = (filtered - dot(neighbors, .25)) * strength;
+  // Keep the luma adjustment within the local range and RGB headroom.
+  float darkHeadroom = min(center.r, min(center.g, center.b));
+  float lightHeadroom = 1 - max(center.r, max(center.g, center.b));
+  center += clamp(correction, max(-darkHeadroom, min(0, low - filtered)),
+      min(lightHeadroom, max(0, high - filtered)));
+ }
+ return center;
 }
 #else
 float3 filterPreview(float2 uv, bool nv12) {
