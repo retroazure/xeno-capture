@@ -203,10 +203,12 @@ public partial class MainWindow
             await main.DiagnosticDisconnect();
 
             await CheckFullscreenDisplays();
+            CheckDockClock();
             var animated = await CheckFullscreenEntry(true, exit: ExitWithHover);
             var appDisplay = System.Windows.Forms.Screen.FromHandle(new WindowInteropHelper(main).Handle);
             var secondDisplay = System.Windows.Forms.Screen.AllScreens.FirstOrDefault(screen => screen.DeviceName != appDisplay.DeviceName);
-            var crossDisplay = secondDisplay == null ? (int?)null : (await CheckFullscreenEntry(true, secondDisplay.Bounds, exit: ExitWithHover)).ExitRegionUpdates;
+            (int Frames, int WindowRegionUpdates, int ExitRegionUpdates, int ExitWindowMoves, long ExitPresents)? crossDisplay = secondDisplay == null ? null
+                : await CheckFullscreenEntry(true, secondDisplay.Bounds, exit: ExitWithHover);
             var interrupted = await CheckFullscreenEntry(true, interruptEntry: true);
             await CheckFullscreenEntry(false,
                 exit: _ => SendDiagnosticWindowMessage(main.fullscreenPreview!.Handle, 0x0100, 122, 0));
@@ -217,7 +219,9 @@ public partial class MainWindow
                 animatedFrames = animated.Frames, animatedRegionUpdates = animated.WindowRegionUpdates,
                 reducedMotionFrames = reducedMotion.Frames, reducedMotionRegionUpdates = reducedMotion.WindowRegionUpdates,
                 exitRegionUpdates = animated.ExitRegionUpdates, reducedMotionExitRegionUpdates = reducedMotion.ExitRegionUpdates,
-                displaysChecked = System.Windows.Forms.Screen.AllScreens.Length, crossDisplayExitRegionUpdates = crossDisplay,
+                displaysChecked = System.Windows.Forms.Screen.AllScreens.Length, crossDisplayExitRegionUpdates = crossDisplay?.ExitRegionUpdates,
+                exitWindowMoves = animated.ExitWindowMoves, crossDisplayExitWindowMoves = crossDisplay?.ExitWindowMoves,
+                exitPresents = animated.ExitPresents, crossDisplayExitPresents = crossDisplay?.ExitPresents,
                 interruptedExitRegionUpdates = interrupted.ExitRegionUpdates, dockViewportReadback = "pass" };
             System.IO.File.WriteAllText(System.IO.Path.Combine(folder, "fullscreen-entry.json"), System.Text.Json.JsonSerializer.Serialize(entry));
             System.IO.File.WriteAllText(System.IO.Path.Combine(folder, "appearance-result.txt"), "PASS");
@@ -317,7 +321,27 @@ public partial class MainWindow
             Require(window.DiagnosticExitButton == null, "The exit control stayed visible after it was clicked.");
         }
 
-        async Task<(int Frames, int WindowRegionUpdates, int ExitRegionUpdates)> CheckFullscreenEntry(bool motion,
+        static void CheckDockClock()
+        {
+            var window = new System.Drawing.Rectangle(100, 100, 1000, 600);
+            var start = new System.Drawing.Rectangle(200, 150, 800, 500);
+            var target = new System.Drawing.Rectangle(160, 280, 640, 360);
+            var dock = new UI.FullscreenDockMotion(window, start, target, 42);
+            const long firstPresent = 8_000_000;
+            var initial = dock.Sample(firstPresent);
+            Require(initial.Window == window && !initial.Complete && initial.Diameter == 42
+                && initial.Clip == new System.Drawing.Rectangle(100, 50, 800, 500),
+                "Waiting for the renderer changed the initial exit pose.");
+
+            dock.Presented(firstPresent);
+            Require(dock.Sample(firstPresent) == initial, "The first exit presentation did not start at the initial pose.");
+            var landing = dock.Sample(firstPresent + UI.FullscreenMotion.Duration);
+            Require(landing.Window == window && landing.Complete && landing.Diameter == 0
+                && landing.Clip == new System.Drawing.Rectangle(60, 180, 640, 360),
+                "Exit did not reach the preview after the shared animation duration.");
+        }
+
+        async Task<(int Frames, int WindowRegionUpdates, int ExitRegionUpdates, int ExitWindowMoves, long ExitPresents)> CheckFullscreenEntry(bool motion,
             System.Drawing.Rectangle? display = null, bool interruptEntry = false, Action<UI.PreviewWindow>? exit = null)
         {
             sources.Enqueue(new TestCaptureBackend { Produce = true, OneFrame = true });
@@ -330,7 +354,8 @@ public partial class MainWindow
             int expected = main.MotionEnabled && !interruptEntry ? 5 : 1;
             var target = main.EmbeddedPreviewBounds();
             Require(target.HasValue, "The embedded preview had no desktop bounds.");
-            await main.ToggleFullscreenOnDisplay(display is { } bounds ? () => bounds : main.ResolveFullscreenBounds);
+            var fullscreenBounds = display ?? main.ResolveFullscreenBounds();
+            await main.ToggleFullscreenOnDisplay(() => fullscreenBounds);
             Require(main.DiagnosticPreview != null && !ReferenceEquals(main.DiagnosticPreview, main.DiagnosticEmbedded),
                 "The fullscreen entry test did not open a fullscreen host.");
             await WaitForFrames(before, expected);
@@ -349,6 +374,8 @@ public partial class MainWindow
                     "Fullscreen window motion did not apply and remove its rounded region.");
             }
             int updates = window.EntryRegionUpdates;
+            var fullscreenHost = main.fullscreenPreview!;
+            long beforeExit = fullscreenHost.RepeatedPresentations;
             var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             int coveredPresent = 0;
             main.embeddedPreview.FramePresented += _ =>
@@ -375,12 +402,14 @@ public partial class MainWindow
             {
                 Require(window.FirstDockBounds is { } start && start.Size != target!.Value.Size && window.LandingBounds == target,
                     "The fullscreen window did not land on the embedded preview's desktop bounds.");
+                Require(fullscreenBounds.Contains(target!.Value) ? window.DockWindowMoves == 0 : window.DockWindowMoves > 0,
+                    "The fullscreen window moved unnecessarily or failed to travel to the destination display.");
                 Require(System.Threading.Volatile.Read(ref coveredPresent) == 1 && !window.HoldsLandingSurface,
                     "The landed window did not cover the preview through its first presentation or release afterward.");
             }
             else Require(window.LandingBounds == null, "Reduced motion moved the fullscreen window.");
             await main.DiagnosticDisconnect();
-            return (shown, updates, exitUpdates);
+            return (shown, updates, exitUpdates, window.DockWindowMoves, fullscreenHost.RepeatedPresentations - beforeExit);
         }
 
         async Task WaitForFrames(long before, int minimum = 3)

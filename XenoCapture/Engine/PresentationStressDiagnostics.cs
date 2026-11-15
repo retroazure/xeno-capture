@@ -316,7 +316,20 @@ internal static class PresentationStressDiagnostics
             }
             if (maxDeviation > 3_000)
                 throw new InvalidOperationException("Steady pacing did not smooth alternating input jitter.");
-            long missedFrame = baseTime + 241 * period;
+            long settledHold = 0;
+            for (int i = 240; i < 252; i++)
+            {
+                long time = baseTime + i * period, arrival = time + lag;
+                long due = cadence.Deadline(time, period, arrival, hz);
+                if (due < arrival || (i > 240 && Math.Abs(due - previousDue - period) > 5_000))
+                    throw new InvalidOperationException("Steady pacing changed phase abruptly as delivery stabilized.");
+                settledHold = due - arrival;
+                previousDue = due;
+            }
+            if (settledHold > 7_500)
+                throw new InvalidOperationException("Steady pacing kept an old hold after delivery stabilized.");
+
+            long missedFrame = baseTime + 253 * period;
             if (cadence.Deadline(missedFrame, period, missedFrame + lag, hz) != missedFrame + lag)
                 throw new InvalidOperationException("Steady pacing held a frame after a dropped input.");
 
@@ -352,7 +365,8 @@ internal static class PresentationStressDiagnostics
                 || cadence.Deadline(baseTime + 71 * period, period, shifted + period, hz) != shifted + period
                 || cadence.Deadline(baseTime + 72 * period, period, shifted + 2 * period, hz) != shifted + 2 * period)
                 throw new InvalidOperationException("Steady pacing did not catch up to a changed delivery phase.");
-            cases.Add(new { hz, maximumScheduledGapErrorMs = maxDeviation / 10000.0, maximumHoldMs = maxHold / 10000.0 });
+            cases.Add(new { hz, maximumScheduledGapErrorMs = maxDeviation / 10000.0,
+                maximumHoldMs = maxHold / 10000.0, settledHoldMs = settledHold / 10000.0 });
         }
         return cases;
     }
@@ -365,7 +379,9 @@ internal static class PresentationStressDiagnostics
         bool steadyAi = steadyUltra || (steadyOnly && Array.IndexOf(args, "--steady-pacing-ai") >= 0);
         long arrivalSpike = steadyOnly && Array.IndexOf(args, "--steady-pacing-short-spikes") >= 0 ? 52_000
             : steadyOnly && Array.IndexOf(args, "--steady-pacing-spikes") >= 0 ? 95_000 : 0;
-        var source = new PacedVideoBackend(1920, 1080, arrivalJitter, pan: aiMotion || steadyOnly, arrivalSpike: arrivalSpike);
+        bool settle = steadyOnly && Array.IndexOf(args, "--steady-pacing-settle") >= 0;
+        var source = new PacedVideoBackend(1920, 1080, arrivalJitter, pan: aiMotion || steadyOnly,
+            arrivalSpike: arrivalSpike, settle: settle);
         var main = new MainWindow(false, false, (_, _) => new CaptureStream(() => source, TimeSpan.FromSeconds(2)))
             { ShowActivated = false };
         main.Show();
@@ -441,6 +457,17 @@ internal static class PresentationStressDiagnostics
                     ["dxgiDisplaySamples"] = displaySamples,
                     ["dxgiRefreshGapSamples"] = refreshGaps.Length
                 };
+                if (settle)
+                {
+                    var settledAges = sample.Where(frame => source.IsSettled(frame.Time))
+                        .Select(frame => (frame.At - frame.Time) / 10000.0).Order().ToArray();
+                    report["settledSamples"] = settledAges.Length;
+                    if (settledAges.Length > 0)
+                    {
+                        report["settledAgeP50Ms"] = At(settledAges, .50);
+                        report["settledAgeP95Ms"] = At(settledAges, .95);
+                    }
+                }
                 if (arrivalSpike > 0)
                 {
                     var recoveryAges = sample.Where(frame => source.IsAfterSpike(frame.Time))
@@ -506,7 +533,8 @@ internal static class PresentationStressDiagnostics
                 return new()
                 {
                     ["displays"] = displays, ["injectedAlternateDelayMs"] = arrivalJitter / 10000.0,
-                    ["injectedSpikeMs"] = arrivalSpike / 10000.0, ["measuresPhysicalPixelResponse"] = false
+                    ["injectedSpikeMs"] = arrivalSpike / 10000.0, ["alternatesJitterWithStableDelivery"] = settle,
+                    ["measuresPhysicalPixelResponse"] = false
                 };
             }
             var windowed = await Sample(main.DiagnosticPreview ?? throw new InvalidOperationException("No windowed preview host."));
@@ -542,11 +570,18 @@ internal static class PresentationStressDiagnostics
         }
         finally { await main.DiagnosticClose().WaitAsync(TimeSpan.FromSeconds(5)); }
     }
-    sealed class PacedVideoBackend(int width, int height, long arrivalJitter = 0, bool pan = false, long arrivalSpike = 0) : ICaptureBackend
+    sealed class PacedVideoBackend(int width, int height, long arrivalJitter = 0, bool pan = false, long arrivalSpike = 0,
+        bool settle = false) : ICaptureBackend
     {
-        const int SpikeInterval = 60;
+        const int SpikeInterval = 60, SettlingBlock = 120;
         const long Period = 166_667;
         internal bool IsAfterSpike(long time) => (time - origin) / Period % SpikeInterval is >= 1 and <= 8;
+        internal bool IsSettled(long time)
+        {
+            long index = (time - origin) / Period;
+            return InStableBlock(index) && index % SettlingBlock >= 8;
+        }
+        static bool InStableBlock(long index) => index / SettlingBlock % 2 == 1;
         readonly ManualResetEvent stopped = new(false);
         SafeWaitHandle? timer; readonly nint[] waitHandles = new nint[2];
         readonly object shutdownGate = new(); bool disposed;
@@ -576,7 +611,7 @@ internal static class PresentationStressDiagnostics
         {
             long index = Frames;
             long timestamp = arrivalJitter == 0 ? next : origin + index * Period;
-            long extra = index % 2 == 1 ? arrivalJitter : 0;
+            long extra = index % 2 == 1 && (!settle || !InStableBlock(index)) ? arrivalJitter : 0;
             if (index % SpikeInterval == 0) extra += arrivalSpike;
             long delay = timestamp + extra - Clock.Now;
             if (delay > 0)

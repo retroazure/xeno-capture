@@ -424,10 +424,17 @@ internal sealed partial class Direct3DHost
             }
             if (WaitForMotionRedraw() || !WaitForFrameSlot() || !IsActive()) return;
 
+            if (presentedAt == 0)
+            {
+                entryAnimating = false;
+                // Docking uses physical pixels. Size once from the canvas and
+                // ignore intermediate WPF layout or DPI changes while it moves.
+                Renderer.Resize(docking.CanvasSize.Width, docking.CanvasSize.Height);
+            }
             long sampleTime = Clock.Now;
-            PrepareDraw(updateAi: false);
             Renderer.RedrawFullscreenMotion(docking.Sample(sampleTime).Clip);
-            if (Present(lastMotionFrame with { Kind = PresentationKind.Repeated })) docking.Presented(sampleTime);
+            if (Present(lastMotionFrame with { Kind = PresentationKind.Repeated }))
+                docking.Presented(presentedAt == 0 ? lastPresentedAt : sampleTime);
             motionRedrawAt = sampleTime + EntryRedrawInterval;
         }
 

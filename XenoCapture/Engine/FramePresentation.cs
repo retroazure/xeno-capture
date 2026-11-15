@@ -61,8 +61,8 @@ internal readonly record struct SourceFramePacing(long Time, long Duration, long
 internal struct FullscreenSourceCadence
 {
     long previousTime, previousDuration, expectedArrival;
-    long pendingLatePhase;
-    int latePhaseAge;
+    long pendingLatePhase, earlyArrivalPhase;
+    int latePhaseAge, earlyPhaseSamples;
 
     internal static uint RefreshInterval(long duration, double refreshHz)
     {
@@ -87,6 +87,7 @@ internal struct FullscreenSourceCadence
         {
             expectedArrival = arrival;
             latePhaseAge = 0;
+            earlyPhaseSamples = 0;
             return arrival;
         }
 
@@ -100,12 +101,26 @@ internal struct FullscreenSourceCadence
             expectedArrival = confirmed ? arrival : expected;
             pendingLatePhase = error;
             latePhaseAge = confirmed ? 0 : 1;
+            earlyPhaseSamples = 0;
             return arrival;
         }
 
         latePhaseAge = latePhaseAge == 1 ? 2 : 0;
-        // Track the later edge of normal jitter without adding a fixed reserve.
-        expectedArrival = expected + (error > 0 ? error : error / 32);
+        // Release a hold built up during jitter once the capture has settled
+        // into a consistently earlier phase. Slew the change across frames.
+        const long earlyTolerance = 6_000;
+        if (error < -earlyTolerance)
+        {
+            long phase = arrival - time;
+            earlyPhaseSamples = Math.Abs(phase - earlyArrivalPhase) <= earlyTolerance
+                ? Math.Min(earlyPhaseSamples + 1, 4) : 1;
+            earlyArrivalPhase = phase;
+        }
+        else earlyPhaseSamples = 0;
+
+        long correction = error > 0 ? error : error / 32;
+        if (earlyPhaseSamples >= 4) correction = Math.Max(error, -5_000);
+        expectedArrival = expected + correction;
         return arrival + Math.Clamp(expectedArrival - arrival, 0, hold);
     }
 }

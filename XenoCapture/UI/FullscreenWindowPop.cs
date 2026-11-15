@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Media;
+using System.Windows.Threading;
 using XenoCapture.Engine;
 
 namespace XenoCapture.UI;
@@ -26,29 +27,42 @@ internal static class FullscreenMotion
         return (float)(.975 + .025 * Smooth((progress - .84) / .16));
     }
 
-    static double Smooth(double progress) => progress * progress * (3 - 2 * progress);
+    internal static double Smooth(double progress) => progress * progress * (3 - 2 * progress);
 }
 
 // The UI window and the video draw use the same screen-space animation sample.
-internal sealed class FullscreenDockMotion(Rectangle window, Rectangle start, Rectangle target, long started)
+internal sealed class FullscreenDockMotion(Rectangle window, Rectangle start, Rectangle target, int startDiameter,
+    Action? notifyFrame = null)
 {
-    const long Duration = 2_800_000;
-    readonly Size canvas = new(Math.Max(window.Width, target.Width), Math.Max(window.Height, target.Height));
-    long presentedAt;
+    readonly bool fixedWindow = window.Contains(target);
+    internal Size CanvasSize { get; } = new(Math.Max(window.Width, target.Width), Math.Max(window.Height, target.Height));
+    long startedAt, presentedAt;
     internal long PresentedAt => Volatile.Read(ref presentedAt);
-    internal void Presented(long sampleTime) => Volatile.Write(ref presentedAt, sampleTime);
+
+    internal void Presented(long sampleTime)
+    {
+        if (startedAt == 0) Volatile.Write(ref startedAt, sampleTime);
+        Volatile.Write(ref presentedAt, sampleTime);
+        notifyFrame?.Invoke();
+    }
     internal bool Landed { get; set; }
     internal XenoCapture.Engine.Com? Surface { get; set; }
 
     internal (Rectangle Window, Rectangle Clip, int Diameter, bool Complete) Sample(long now)
     {
-        double progress = Math.Clamp((now - started) / (double)Duration, 0, 1);
-        double eased = progress * progress * (3 - 2 * progress);
+        long started = Volatile.Read(ref startedAt);
+        double progress = started == 0 ? 0 : Math.Clamp((now - started) / (double)FullscreenMotion.Duration, 0, 1);
+        double eased = FullscreenMotion.Smooth(progress);
         int Blend(int a, int b) => (int)Math.Round(a + (b - a) * eased);
-        int width = Blend(start.Width, target.Width), height = Blend(start.Height, target.Height);
-        var clip = new Rectangle((canvas.Width - width) / 2, (canvas.Height - height) / 2, width, height);
-        var outer = new Rectangle(Blend(start.X, target.X) - clip.X, Blend(start.Y, target.Y) - clip.Y, canvas.Width, canvas.Height);
-        int diameter = (int)Math.Round(64 * Math.Sin(Math.PI * progress));
+        var visible = new Rectangle(Blend(start.X, target.X), Blend(start.Y, target.Y),
+            Blend(start.Width, target.Width), Blend(start.Height, target.Height));
+        // On the same display we can dock by clipping a stationary swap chain.
+        // A destination outside it needs the fixed-size canvas to travel.
+        var outer = fixedWindow ? window : new Rectangle(
+            visible.X - (CanvasSize.Width - visible.Width) / 2,
+            visible.Y - (CanvasSize.Height - visible.Height) / 2, CanvasSize.Width, CanvasSize.Height);
+        var clip = new Rectangle(visible.X - outer.X, visible.Y - outer.Y, visible.Width, visible.Height);
+        int diameter = (int)Math.Round(startDiameter * (1 - eased) + 64 * Math.Sin(Math.PI * progress));
         return (outer, clip, diameter, progress >= 1);
     }
 }
@@ -58,12 +72,17 @@ internal sealed class FullscreenWindowPop
 {
     readonly nint hwnd;
     readonly Direct3DHost host;
+    readonly Dispatcher dispatcher = Dispatcher.CurrentDispatcher;
+    readonly Action applyQueuedDockFrame;
+    int dockFrameQueued;
     readonly long openedAt = Clock.Now;
     (int Left, int Top, int Right, int Bottom, int Diameter) previous;
     bool rendering;
     TaskCompletionSource? exit;
     FullscreenDockMotion? docking;
     long appliedSample;
+    Rectangle dockWindow;
+    internal int DockWindowMoves { get; private set; }
     internal Rectangle? LandingBounds { get; private set; }
     internal Rectangle? FirstDockBounds { get; private set; }
     internal bool HoldsLandingSurface => docking?.Surface != null;
@@ -74,6 +93,7 @@ internal sealed class FullscreenWindowPop
     {
         this.hwnd = hwnd;
         this.host = host;
+        applyQueuedDockFrame = ApplyQueuedDockFrame;
         if (animateEntry)
         {
             Apply(0);
@@ -97,18 +117,17 @@ internal sealed class FullscreenWindowPop
             : window;
         if (start.Width < 2 || start.Height < 2) return false;
 
-        long now = Clock.Now;
-        var motion = new FullscreenDockMotion(window, start, target, now);
-        var first = motion.Sample(now);
-        if (first.Window != window && (!PreviewWindow.PositionWindow(hwnd, first.Window) || !ApplyRegion(first.Clip, 0)))
-            return false;
+        var motion = new FullscreenDockMotion(window, start, target, RegionActive ? previous.Diameter : 0, QueueDockFrame);
+        dockWindow = window;
+        var first = motion.Sample(0);
+        if (first.Window != window && !ApplyDockSample(first.Window, first.Clip, first.Diameter)) return false;
 
         exit = new(TaskCreationOptions.RunContinuationsAsynchronously);
         docking = motion;
         if (!host.StartFullscreenExit(motion)) return false;
         StartRendering();
         // Bound teardown if the desktop or renderer stops delivering frames.
-        await Task.WhenAny(exit.Task, Task.Delay(TimeSpan.FromMilliseconds(460)));
+        await Task.WhenAny(exit.Task, Task.Delay(TimeSpan.FromMilliseconds(FullscreenMotion.Duration / 10_000.0 + 180)));
         return motion.Landed;
     }
 
@@ -118,31 +137,47 @@ internal sealed class FullscreenWindowPop
         if (docking != null) docking.Surface = null;
     }
 
+    void QueueDockFrame()
+    {
+        // Apply the latest accepted video pose without waiting for another WPF
+        // composition tick. A busy dispatcher only needs the newest pose.
+        if (Interlocked.Exchange(ref dockFrameQueued, 1) == 0)
+            dispatcher.BeginInvoke(DispatcherPriority.Render, applyQueuedDockFrame);
+    }
+
+    void ApplyQueuedDockFrame()
+    {
+        Volatile.Write(ref dockFrameQueued, 0);
+        if (rendering && docking is { } motion) ApplyLatestDockFrame(motion);
+    }
+
+    void ApplyLatestDockFrame(FullscreenDockMotion motion)
+    {
+        long sampleTime = motion.PresentedAt;
+        if (sampleTime == 0 || sampleTime == appliedSample) return;
+        var sample = motion.Sample(sampleTime);
+        if (!ApplyDockSample(sample.Window, sample.Clip, sample.Diameter)) return;
+        appliedSample = sampleTime;
+        var visible = sample.Clip;
+        visible.Offset(sample.Window.Location);
+        FirstDockBounds ??= visible;
+        if (sample.Complete)
+        {
+            LandingBounds = visible;
+            motion.Landed = true;
+            Stop(clear: false);
+        }
+    }
+
     void Render(object? sender, EventArgs e)
     {
-        long now = Clock.Now;
         if (docking is { } motion)
         {
-            // Move the visible region only after its matching draw was queued.
-            long sampleTime = motion.PresentedAt;
-            if (sampleTime == 0 || sampleTime == appliedSample) return;
-            var sample = motion.Sample(sampleTime);
-            if (!PreviewWindow.PositionWindow(hwnd, sample.Window) || !ApplyRegion(sample.Clip, sample.Diameter)
-                || !GetWindowRect(hwnd, out var actual)) return;
-            var outer = Rectangle.FromLTRB(actual.Left, actual.Top, actual.Right, actual.Bottom);
-            // A DPI change can reposition the HWND during SetWindowPos. Retry on the next composition tick.
-            if (outer != sample.Window) return;
-            appliedSample = sampleTime;
-            var visible = new Rectangle(outer.X + sample.Clip.X, outer.Y + sample.Clip.Y, sample.Clip.Width, sample.Clip.Height);
-            FirstDockBounds ??= visible;
-            if (sample.Complete)
-            {
-                LandingBounds = visible;
-                motion.Landed = true;
-                Stop(clear: false);
-            }
+            // Retry a move if a DPI change interrupted it.
+            ApplyLatestDockFrame(motion);
             return;
         }
+        long now = Clock.Now;
         long start = host.FullscreenEntryStarted;
         // Give a cold renderer time to show its first image, then run the
         // window motion even if the input or AI startup is still waiting.
@@ -151,6 +186,19 @@ internal sealed class FullscreenWindowPop
         long elapsed = start == 0 ? 0 : now - start;
         if (elapsed >= FullscreenMotion.Duration) Stop(clear: true);
         else Apply(elapsed);
+    }
+
+    bool ApplyDockSample(Rectangle window, Rectangle clip, int diameter)
+    {
+        if (dockWindow != window)
+        {
+            if (!PreviewWindow.PositionWindow(hwnd, window) || !GetWindowRect(hwnd, out var actual)) return false;
+            // A DPI change can reposition a moving window. Retry on the next composition tick.
+            if (Rectangle.FromLTRB(actual.Left, actual.Top, actual.Right, actual.Bottom) != window) return false;
+            dockWindow = window;
+            DockWindowMoves++;
+        }
+        return ApplyRegion(clip, diameter);
     }
 
     void Apply(long elapsed)

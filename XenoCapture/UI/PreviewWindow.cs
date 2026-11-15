@@ -28,6 +28,7 @@ internal sealed class PreviewWindow : Window
     internal int EntryRegionUpdates => windowPop?.RegionUpdates ?? 0;
     internal Rectangle? LandingBounds => windowPop?.LandingBounds;
     internal Rectangle? FirstDockBounds => windowPop?.FirstDockBounds;
+    internal int DockWindowMoves => windowPop?.DockWindowMoves ?? 0;
     internal bool HoldsLandingSurface => windowPop?.HoldsLandingSurface == true;
     readonly TaskCompletionSource closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     bool stopping, mayClose, skipMotion;
