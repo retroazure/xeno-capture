@@ -398,8 +398,9 @@ internal static class PresentationStressDiagnostics
             : steadyOnly && Array.IndexOf(args, "--steady-pacing-spikes") >= 0 ? 95_000 : 0;
         bool settle = steadyOnly && Array.IndexOf(args, "--steady-pacing-settle") >= 0;
         bool deviceClock = steadyOnly && Array.IndexOf(args, "--steady-device-clock") >= 0;
+        bool fastTurns = deviceClock && Array.IndexOf(args, "--steady-fast-turns") >= 0;
         var source = new PacedVideoBackend(1920, 1080, deviceClock ? 0 : arrivalJitter, pan: aiMotion || steadyOnly,
-            arrivalSpike: arrivalSpike, settle: settle, deviceClock: deviceClock);
+            arrivalSpike: arrivalSpike, settle: settle, deviceClock: deviceClock, fastTurns: fastTurns);
         var main = new MainWindow(false, false, (_, _) => new CaptureStream(() => source, TimeSpan.FromSeconds(2)))
             { ShowActivated = false };
         main.Show();
@@ -418,6 +419,7 @@ internal static class PresentationStressDiagnostics
             {
                 await Task.Delay(350);
                 var frames = new List<(long At, long Time)>();
+                var outputTimes = new List<long>();
                 var displayed = new List<(uint Present, uint Refresh)>();
                 void OnDisplay(uint present, uint refresh)
                 {
@@ -429,8 +431,12 @@ internal static class PresentationStressDiagnostics
                 }
                 void OnPresent(PresentedFrame frame)
                 {
-                    if (frame.Kind == PresentationKind.Source)
-                        lock (frames) frames.Add((Clock.Now, frame.Time));
+                    long now = Clock.Now;
+                    lock (frames)
+                    {
+                        outputTimes.Add(now);
+                        if (frame.Kind == PresentationKind.Source) frames.Add((now, frame.Time));
+                    }
                 }
                 int steadyDraws = 0;
                 void OnSteadyDraw() => Interlocked.Increment(ref steadyDraws);
@@ -448,12 +454,13 @@ internal static class PresentationStressDiagnostics
                     host.DiagnosticSteadySourceDraw -= OnSteadyDraw;
                 }
                 (long At, long Time)[] sample;
-                double[] refreshGaps;
+                double[] refreshGaps, outputGaps;
                 int displaySamples;
                 double refreshHz = DisplayTiming.RefreshRate(host.Handle);
                 lock (frames)
                 {
                     sample = frames.ToArray();
+                    outputGaps = outputTimes.Zip(outputTimes.Skip(1), (a, b) => (b - a) / 10000.0).Order().ToArray();
                     displaySamples = displayed.Count;
                     refreshGaps = displayed.Zip(displayed.Skip(1), (a, b) =>
                             unchecked(b.Present - a.Present) == 1 ? unchecked(b.Refresh - a.Refresh) : 0)
@@ -471,6 +478,8 @@ internal static class PresentationStressDiagnostics
                 {
                     ["fps"] = fps, ["gapDeviationP95Ms"] = At(deviations, .95),
                     ["sourcePresentations"] = sample.Length,
+                    ["outputGapP99Ms"] = At(outputGaps, .99),
+                    ["outputGapsOver25Ms"] = outputGaps.Count(gap => gap > 25),
                     ["missingSourceFrames"] = sample.Zip(sample.Skip(1), (a, b) =>
                         Math.Max(0, Math.Round((b.Time - a.Time) / (double)period) - 1)).Sum(),
                     ["gapP99Ms"] = At(gaps.Order().ToArray(), .99), ["sampleAgeP50Ms"] = At(ages, .50),
@@ -566,7 +575,7 @@ internal static class PresentationStressDiagnostics
                 return new()
                 {
                     ["displays"] = displays, ["injectedAlternateDelayMs"] = deviceClock ? 0 : arrivalJitter / 10000.0,
-                    ["reproducesDeviceClockGaps"] = deviceClock,
+                    ["reproducesDeviceClockGaps"] = deviceClock, ["fastTurns"] = fastTurns,
                     ["injectedSpikeMs"] = arrivalSpike / 10000.0, ["alternatesJitterWithStableDelivery"] = settle,
                     ["recoverGaps"] = recoveringGaps, ["measuresPhysicalPixelResponse"] = false
                 };
@@ -640,7 +649,7 @@ internal static class PresentationStressDiagnostics
     }
 
     internal sealed class PacedVideoBackend(int width, int height, long arrivalJitter = 0, bool pan = false, long arrivalSpike = 0,
-        bool settle = false, bool deviceClock = false) : ICaptureBackend
+        bool settle = false, bool deviceClock = false, bool fastTurns = false) : ICaptureBackend
     {
         const int SpikeInterval = 60, SettlingBlock = 120;
         const long Period = 166_667;
@@ -672,7 +681,8 @@ internal static class PresentationStressDiagnostics
                 panPattern = new byte[width * height];
                 for (int y = 0; y < height; y++)
                     for (int x = 0; x < width; x++)
-                        panPattern[y * width + x] = (byte)(16 + (17 * ((x / 13 + y / 9) % 13) + 5 * (x / 47 ^ y / 29)) % 220);
+                        panPattern[y * width + x] = fastTurns ? TurnTexture(x / 24, y / 24)
+                            : (byte)(16 + (17 * ((x / 13 + y / 9) % 13) + 5 * (x / 47 ^ y / 29)) % 220);
             }
             origin = next = Clock.Now;
         }
@@ -700,7 +710,8 @@ internal static class PresentationStressDiagnostics
             var frame = new Packet(width * height * 3 / 2, false, width, height, PixelLayout.Nv12) { Time = arrivalJitter == 0 && !deviceClock ? now : timestamp, Duration = Period };
             if (panPattern is { } pattern)
             {
-                int shift = (int)(index * 19 % width);
+                long shiftPixels = fastTurns ? (index + (index - 1) / 24) * 72 : index * 19;
+                int shift = (int)(shiftPixels % width);
                 for (int y = 0; y < height; y++)
                 {
                     int row = y * width;
@@ -712,6 +723,13 @@ internal static class PresentationStressDiagnostics
             Array.Fill(frame.Bytes, (byte)128, width * height, width * height / 2);
             return frame;
         }
+        static byte TurnTexture(int column, int row)
+        {
+            uint cell = unchecked((uint)(column * 73856093 ^ row * 19349663));
+            cell = unchecked((cell ^ (cell >> 13)) * 1274126177);
+            return (byte)(16 + (cell ^ (cell >> 16)) % 220);
+        }
+
         internal Dictionary<string, object> CadenceStats()
         {
             intervals.Sort();

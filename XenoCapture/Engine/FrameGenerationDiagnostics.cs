@@ -505,17 +505,7 @@ internal static class FrameGenerationDiagnostics
         Require(second.Bytes.AsSpan(0, second.Length).SequenceEqual(renderer.Readback()),
             "Prediction changed the newest real image.");
 
-        bool MotionReady()
-        {
-            var wait = Stopwatch.StartNew();
-            bool? ready;
-            while ((ready = renderer.PredictionReady()) == null && wait.ElapsedMilliseconds < 2000)
-                Thread.Sleep(1);
-            Require(ready != null, "Prediction analysis did not complete.");
-            return ready == true;
-        }
-
-        Require(renderer.BeginPrediction() && MotionReady(), "The motion fixture could not be predicted.");
+        Require(renderer.BeginPrediction() && MotionReady(renderer), "The motion fixture could not be predicted.");
         var frame = renderer.RenderPrediction(period / 2, period / 2, 0, PreviewUpscaler.Standard);
         var image = renderer.Readback();
         double predictionError = Error(image, expected.Bytes), sourceError = Error(second.Bytes, expected.Bytes);
@@ -527,9 +517,61 @@ internal static class FrameGenerationDiagnostics
 
         using var cut = new Packet(640 * 360 * 4, width: 640, height: 360) { Time = second.Time + period, Duration = period };
         cut.Bytes.AsSpan(0, cut.Length).Fill(255);
-        Require(renderer.CachePredictionSource(cut, period, false) && renderer.BeginPrediction() && !MotionReady(),
+        Require(renderer.CachePredictionSource(cut, period, false) && renderer.BeginPrediction() && !MotionReady(renderer),
             "Prediction accepted an abrupt scene cut.");
+        Require(renderer.BeginPrediction(searchFastMotion: true) && !MotionReady(renderer),
+            "Gap recovery accepted an abrupt scene cut during the wider search.");
         checks["predictivePreview"] = new { predictionError, sourceError, staticHud = "pass", sceneCut = "pass" };
+        checks["fastTurnPrediction"] = CheckFastTurnPrediction(renderer);
+    }
+
+    static bool MotionReady(D3DPreview renderer)
+    {
+        var wait = Stopwatch.StartNew();
+        bool? ready;
+        while ((ready = renderer.PredictionReady(out _)) == null && wait.ElapsedMilliseconds < 2000)
+            Thread.Sleep(1);
+        Require(ready != null, "Prediction analysis did not complete.");
+        return ready == true;
+    }
+
+    static object CheckFastTurnPrediction(D3DPreview renderer)
+    {
+        var results = new List<object>();
+        foreach (int shift in new[] { 24, -28, 32 })
+        {
+            renderer.ResetInterpolation();
+            const long period = 166_667;
+            using var first = Pattern(0);
+            using var newest = Pattern(shift);
+            using var expected = Pattern(shift + (int)Math.Round(shift * .95));
+            first.Time = Clock.Now;
+            newest.Time = first.Time + period;
+            Require(renderer.CachePredictionSource(first, period, false)
+                && renderer.CachePredictionSource(newest, period, false), "The fast-turn fixture did not cache.");
+            Require(renderer.BeginPrediction(), "The baseline fast-turn motion analysis did not start.");
+            double originalError = Error(newest.Bytes, expected.Bytes);
+            if (MotionReady(renderer))
+            {
+                renderer.RenderPrediction(period, period, 0, PreviewUpscaler.Standard);
+                originalError = Error(renderer.Readback(), expected.Bytes);
+            }
+            Require(renderer.BeginPrediction(searchFastMotion: true) && MotionReady(renderer),
+                $"Gap recovery rejected a fast turn of {shift} pixels.");
+            renderer.RenderPrediction(period, period, 0, PreviewUpscaler.Standard);
+            var pixels = renderer.Readback();
+            double improvedError = Error(pixels, expected.Bytes);
+            Require(improvedError < originalError * .8,
+                $"The wide search did not improve the known fast turn ({improvedError:F2} vs {originalError:F2}).");
+            for (int y = 30; y < 68; y++)
+            {
+                int offset = (y * 640 + 40) * 4;
+                Require(pixels.AsSpan(offset, 160 * 4).SequenceEqual(newest.Bytes.AsSpan(offset, 160 * 4)),
+                    "The fast-turn prediction moved HUD pixels.");
+            }
+            results.Add(new { shift, originalError, improvedError });
+        }
+        return results;
     }
 
     static double Error(byte[] image, byte[] expected)

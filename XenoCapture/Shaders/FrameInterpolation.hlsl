@@ -74,6 +74,17 @@ void ReduceBest(uint thread) {
 float Confidence(float initial,float error,float alternative) {
     return initial-error<.005 ? 0 : saturate((.045-error)/.035)*saturate((alternative-error)/.025);
 }
+// Use the lanes outside the central 9x9 grid for a sparse outer search.
+float2 OuterPredictionOffset(uint index) {
+    if (index >= 40) {
+        float axis = (index & 1) == 0 ? -14 : 14;
+        return (index & 2) == 0 ? float2(axis, 0) : float2(0, axis);
+    }
+    int band = int((index % 20) / 5);
+    float2 offset = float2((band < 2 ? -16 : 4) + 4 * band, int(index % 5) * 4 - 8);
+    return index < 20 ? offset : offset.yx;
+}
+
 [numthreads(128,1,1)] void Motion(uint3 group:SV_GroupID,uint thread:SV_GroupIndex) {
     float2 p=min(group.xy*8+3.5,AnalysisSize-1);
     if(thread==0) { InitialF=Cost(p,0,false); InitialB=Cost(p,0,true); StaticTile=max(InitialF,InitialB)<.003; }
@@ -83,10 +94,13 @@ float Confidence(float initial,float error,float alternative) {
         return;
     }
     bool wide=(Flags&1)!=0;
-    float2 d=float2(int(thread%9)*2-8,int(thread/9)*2-8);
-    OffsetF[thread]=OffsetB[thread]=d;
-    ScoreF[thread]=thread<81 ? Cost(p,d,false)+dot(d,d)*.00001 : 1e6;
-    ScoreB[thread]=thread<81 ? Cost(p,d,true)+dot(d,d)*.00001 : 1e6;
+    bool predictionOuter = (Flags & 2) != 0 && thread >= 81 && thread < 125;
+    float2 d = predictionOuter ? OuterPredictionOffset(thread - 81)
+        : float2(int(thread % 9) * 2 - 8, int(thread / 9) * 2 - 8);
+    bool candidate = thread < 81 || predictionOuter;
+    OffsetF[thread] = OffsetB[thread] = d;
+    ScoreF[thread] = candidate ? Cost(p, d, false) + dot(d, d) * .00001 : 1e6;
+    ScoreB[thread] = candidate ? Cost(p, d, true) + dot(d, d) * .00001 : 1e6;
     // Keep every original small-motion candidate. Add only the outer ring
     // of the wider search; sparse large offsets must not replace small ones.
     if(wide && thread<81 && any(abs(d)>4)) {

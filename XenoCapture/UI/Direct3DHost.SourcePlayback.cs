@@ -21,7 +21,7 @@ internal sealed partial class Direct3DHost
         long predictionEnd;
         long predictionArrival;
         long predictionRestoreAt;
-        bool predictionStarted;
+        bool predictionStarted, predictionSearchedFastMotion;
         bool predictionShown;
         bool? predictionReady;
         double predictionDrawMs;
@@ -242,7 +242,7 @@ internal sealed partial class Direct3DHost
                 predictionEnd = consumedArrival + contentFramePeriod - interval / 4;
                 predictionRestoreAt = consumedArrival + contentFramePeriod + interval / 2;
             }
-            predictionStarted = false;
+            predictionStarted = predictionSearchedFastMotion = false;
             predictionReady = null;
         }
 
@@ -327,8 +327,17 @@ internal sealed partial class Direct3DHost
             long lead = recoveringGaps ? 0
                 : Math.Clamp((long)(predictionDrawMs * 10_000) + 2_500, 2_500, Math.Min(15_000, interval / 4));
             if (now < due - lead) { deadline!.WaitUntil(due - lead); return true; }
-            predictionReady ??= Renderer.PredictionReady();
             long retryAt = recoveringGaps ? Math.Min(expires, due + 45_000) : due;
+            if (predictionReady == null)
+            {
+                predictionReady = Renderer.PredictionReady(out bool needsWiderSearch);
+                if (recoveringGaps && needsWiderSearch && !predictionSearchedFastMotion
+                    && Clock.Now < retryAt - 10_000 && CanShowPrediction(requested))
+                {
+                    predictionSearchedFastMotion = true;
+                    if (Renderer.BeginPrediction(searchFastMotion: true)) predictionReady = null;
+                }
+            }
             long checkedAt = Clock.Now;
             if (predictionReady == null && checkedAt < retryAt)
             {

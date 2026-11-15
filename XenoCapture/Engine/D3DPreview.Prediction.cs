@@ -48,7 +48,7 @@ internal sealed unsafe partial class D3DPreview
         }
     }
 
-    internal bool BeginPrediction()
+    internal bool BeginPrediction(bool searchFastMotion = false)
     {
         if (!HasInterpolationPair || (predictionReadbackPending && !TryMapFrameStatistics(MapDoNotWait, out _)))
             return false;
@@ -59,7 +59,8 @@ internal sealed unsafe partial class D3DPreview
         FrameCompute(frameCompare!, frameLow[framePrevious]!.View, frameLow[frameCurrent]!.View, null, null,
             null, null, frameStatsView, (analysisWidth + 15) / 16, (analysisHeight + 7) / 8);
         FrameCompute(frameMotion!, frameLow[framePrevious]!.View, frameLow[frameCurrent]!.View, null, null,
-            frameForward!.Attachment, frameBackward!.Attachment, frameStatsView, flowWidth, flowHeight);
+            frameForward!.Attachment, frameBackward!.Attachment, frameStatsView, flowWidth, flowHeight,
+            flags: searchFastMotion ? 2u : 0u);
         CopyFrameStatistics();
         SubmitPendingDraw();
         predictionReadbackPending = true;
@@ -75,13 +76,16 @@ internal sealed unsafe partial class D3DPreview
     }
 
     // null means the GPU is still working. The caller can drop this output slot.
-    internal bool? PredictionReady()
+    internal bool? PredictionReady(out bool needsWiderSearch)
     {
+        needsWiderSearch = false;
         if (!predictionReadbackPending) return false;
         if (!TryMapFrameStatistics(MapDoNotWait, out var stats)) return null;
         predictionReadbackPending = false;
-        return stats.Changed > 0 && stats.Active > 0 && stats.Trusted >= stats.Active * .35
+        bool meaningfulMotion = stats.Changed > 0 && stats.Active > 0
             && stats.Mean <= .35 && stats.Large <= stats.Samples * .8;
+        needsWiderSearch = meaningfulMotion && stats.Trusted < stats.Active * .35;
+        return meaningfulMotion && !needsWiderSearch;
     }
 
     internal PresentedFrame RenderPrediction(long ahead, long interval, double sharpness, PreviewUpscaler upscaler)
