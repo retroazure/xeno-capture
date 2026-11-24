@@ -357,10 +357,10 @@ internal sealed partial class Direct3DHost
                 Renderer.PresentationScale = FullscreenMotion.Scale(started == 0 ? 0 : Clock.Now - started);
             }
         }
-        bool Present(PresentedFrame frame, bool restoreSource = false, uint refreshInterval = 1)
+        bool Present(PresentedFrame frame, bool restoreSource = false)
         {
             bool accepted = Renderer.Present(allowBlocking: frame.Kind == PresentationKind.Source || restoreSource,
-                syncInterval: host.SmoothSourcePacing ? refreshInterval : 0);
+                syncInterval: host.SmoothSourcePacing ? 1u : 0u);
             host.LastSubmissionMs = Renderer.LastUploadDrawMs;
             Volatile.Write(ref host.enhancedUpscalingActive, Renderer.UsedEnhancedUpscaling);
             Volatile.Write(ref host.rtxVideoRequested, Renderer.RtxVideoRequested);

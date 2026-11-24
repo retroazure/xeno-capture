@@ -491,6 +491,8 @@ internal static class PresentationStressDiagnostics
                     ["dxgiDisplaySamples"] = displaySamples,
                     ["dxgiRefreshGapSamples"] = refreshGaps.Length
                 };
+                if (deviceClock)
+                    report["droppedDeliveredFrames"] = source.DeliveredBetween(sample[0].Time, sample[^1].Time) - sample.Length;
                 if (settle)
                 {
                     var settledAges = sample.Where(frame => source.IsSettled(frame.Time))
@@ -653,6 +655,11 @@ internal static class PresentationStressDiagnostics
     {
         const int SpikeInterval = 60, SettlingBlock = 120;
         const long Period = 166_667;
+        internal long DeliveredBetween(long first, long last)
+        {
+            long firstTick = (first - origin) / 160_000, lastTick = (last - origin) / 160_000;
+            return (lastTick - lastTick / 25) - (firstTick - firstTick / 25) + 1;
+        }
         internal bool IsAfterSpike(long time) => (time - origin) / Period % SpikeInterval is >= 1 and <= 8;
         internal bool IsSettled(long time)
         {

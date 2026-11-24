@@ -48,7 +48,7 @@ internal sealed unsafe partial class D3DPreview : IDisposable
     int width, height, inputWidth, inputHeight;
     PixelLayout layout; PreviewUpscaler previousUpscaler;
     readonly record struct ShaderParameters(float Width, float Height, float Sharpness, float Nv12, float FullRange, float Bt601, float EdgeStepX = 0, float EdgeStepY = 0,
-        float AiFootprintX = 0, float AiFootprintY = 0, float AiReductionRatio = 0, float Padding = 0);
+        float AiFootprintX = 0, float AiFootprintY = 0, float AiReductionRatio = 0, float NativeScale = 0);
     ShaderParameters previousParameters;
     readonly Com?[] conversionConstants = new Com?[5];
     bool parametersValid;long sourceContentRevision,imageUploadRevision;
@@ -445,6 +445,15 @@ internal sealed unsafe partial class D3DPreview : IDisposable
                     AiReductionRatio = alignedReduction
                 };
             }
+        }
+        if (RetainFullscreenOutput && !docking && !transitioning && !output.AiResampling
+            && !UsedEnhancedUpscaling && output.UsePreviewFilters
+            && viewport.Width >= parameters.Width - .5f && viewport.Height >= parameters.Height - .5f)
+        {
+            parameters = parameters with
+            {
+                NativeScale = Math.Min(viewport.Width / parameters.Width, viewport.Height / parameters.Height)
+            };
         }
         bool aiFilters = output.AiResampling && (parameters.EdgeStepX > 0 || parameters.Sharpness > .001f);
         if (pixelOverride == null) SetPreviewPixelShader(parameters.AiFootprintX > 0 || aiFilters);

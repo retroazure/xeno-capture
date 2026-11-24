@@ -85,6 +85,20 @@ internal static class UpscalingDiagnostics
                 checks[$"edgeSmoothing{size}ErrorRatio"] = smoothedError / standardError;
                 if (size > edge.Width)
                 {
+                    renderer.RetainFullscreenOutput = true;
+                    renderer.EdgeSmoothing = false;
+                    renderer.Draw(edge, 0);
+                    double fullscreenError = EdgeError(renderer.Readback(), size);
+                    renderer.EdgeSmoothing = true;
+                    renderer.Draw(edge, 0);
+                    double fullscreenSmoothedError = EdgeError(renderer.Readback(), size);
+                    Require(fullscreenSmoothedError < fullscreenError,
+                        "Edge smoothing no longer reduces jagged diagonals with the fullscreen sampling weights.");
+                    checks["fullscreenDiagonalErrorRatio"] = fullscreenSmoothedError / fullscreenError;
+                    renderer.RetainFullscreenOutput = false;
+                }
+                if (size > edge.Width)
+                {
                     renderer.Draw(edge, 0, PreviewUpscaler.Enhanced);
                     byte[] enhancedSmoothed = renderer.Readback();
                     renderer.EdgeSmoothing = false;
@@ -98,6 +112,8 @@ internal static class UpscalingDiagnostics
                 }
             }
         }
+        checks["standardFullscreenDetail"] = CheckFullscreenDetail();
+        checks["fullscreenPixelCoverage"] = CheckFullscreenPixelCoverage();
         Mark("NV12 color and range");
         using (var renderer = new D3DPreview(0, 640, 480))
         using (var frame = new Packet(320 * 240 * 3 / 2, false, 320, 240, PixelLayout.Nv12))
@@ -175,6 +191,122 @@ internal static class UpscalingDiagnostics
                 { FullRange = source.FullRange, Bt601 = source.Bt601 };
             source.Bytes.AsSpan(0, source.Length).CopyTo(copy.Bytes);
             return copy;
+        }
+    }
+
+    static object CheckFullscreenDetail()
+    {
+        const int size = 96, output = 128;
+        var contrast = new Dictionary<string, int>();
+        foreach (var layout in new[] { PixelLayout.Bgr32, PixelLayout.Nv12 })
+        {
+            int pixels = size * size;
+            using var frame = new Packet(layout == PixelLayout.Nv12 ? pixels * 3 / 2 : pixels * 4,
+                false, size, size, layout) { FullRange = true };
+            if (layout == PixelLayout.Nv12) Array.Fill(frame.Bytes, (byte)128, pixels, pixels / 2);
+            for (int y = 0; y < size; y++)
+                for (int x = 0; x < size; x++)
+                    Paint(x, y, x % 4 == 0 ? (byte)220 : (byte)32);
+
+            using var fullscreen = new D3DPreview(0, output, output);
+            int sample = (64 * output + 43) * 4;
+            fullscreen.Draw(frame, 0);
+            int linear = fullscreen.Readback()[sample];
+            fullscreen.RetainFullscreenOutput = true;
+            fullscreen.Draw(frame, 0);
+            int sharper = fullscreen.Readback()[sample];
+            Require(sharper >= linear + 5 && sharper <= 220, "Standard fullscreen enlargement lost fine detail.");
+            contrast[layout.ToString()] = sharper - linear;
+
+            for (int y = 0; y < size; y++)
+                for (int x = 0; x < size; x++)
+                    Paint(x, y, 32);
+            Paint(48, 48, 204);
+            Paint(47, 48, 10);
+            Paint(48, 47, 10);
+            Paint(49, 48, 110);
+            Paint(48, 49, 110);
+            fullscreen.Resize(size, size);
+            fullscreen.EdgeSmoothing = true;
+            fullscreen.Draw(frame, 0);
+            int thinDetail = fullscreen.Readback()[(48 * size + 48) * 4];
+            Require(Math.Abs(thinDetail - 204) <= 1, "Fullscreen edge smoothing faded a thin highlight.");
+
+            void Paint(int x, int y, byte value)
+            {
+                int index = y * size + x;
+                if (layout == PixelLayout.Nv12)
+                {
+                    frame.Bytes[index] = value;
+                    return;
+                }
+                index *= 4;
+                frame.Bytes[index] = frame.Bytes[index + 1] = frame.Bytes[index + 2] = value;
+                frame.Bytes[index + 3] = 255;
+            }
+        }
+        return contrast;
+    }
+
+    static object CheckFullscreenPixelCoverage()
+    {
+        const int sourceWidth = 1920, sourceHeight = 1080, count = sourceWidth * sourceHeight;
+        var results = new List<object>();
+        foreach (var layout in new[] { PixelLayout.Bgr32, PixelLayout.Nv12 })
+        {
+            bool nv12 = layout == PixelLayout.Nv12;
+            using var frame = new Packet(nv12 ? count * 3 / 2 : count * 4, false, sourceWidth, sourceHeight, layout)
+                { FullRange = true };
+            if (nv12) Array.Fill(frame.Bytes, (byte)128, count, count / 2);
+            for (int y = 0; y < sourceHeight; y++)
+                for (int x = 0; x < sourceWidth; x++)
+                {
+                    // Separate vertical and horizontal one-pixel lines into two fields.
+                    byte shade = Line(y < sourceHeight / 2 ? x : y);
+                    int index = y * sourceWidth + x;
+                    if (nv12) frame.Bytes[index] = shade;
+                    else
+                    {
+                        index *= 4;
+                        frame.Bytes[index] = frame.Bytes[index + 1] = frame.Bytes[index + 2] = shade;
+                        frame.Bytes[index + 3] = 255;
+                    }
+                }
+            foreach (int height in new[] { 1440, 2160 })
+            {
+                int width = height * 16 / 9;
+                using var renderer = new D3DPreview(0, width, height)
+                    { RetainFullscreenOutput = true, EdgeSmoothing = true };
+                Sample(renderer, width, height, aiOutput: false);
+                if (!nv12) Sample(renderer, width, height, aiOutput: true);
+            }
+
+            void Sample(D3DPreview renderer, int width, int height, bool aiOutput)
+            {
+                renderer.DiagnosticAiResampling = aiOutput;
+                renderer.Draw(frame, 0);
+                byte[] pixels = renderer.Readback();
+                double error = 0, scale = height / (double)sourceHeight;
+                for (int i = 0; i < 48; i++)
+                {
+                    int x = width / 4 + i, y = height * 3 / 4 + i;
+                    error = Math.Max(error, Math.Abs(pixels[(height / 4 * width + x) * 4] - Expected(x, scale)));
+                    error = Math.Max(error, Math.Abs(pixels[(y * width + width / 4) * 4] - Expected(y, scale)));
+                }
+                Require(error <= 1.5, $"Fullscreen {height}p softened or bled one-pixel lines ({layout}, AI output {aiOutput}).");
+                results.Add(new { layout = layout.ToString(), height, aiOutput, maximumChannelError = error });
+            }
+        }
+        return results;
+
+        static byte Line(int pixel) => pixel % 4 == 0 ? (byte)220 : (byte)32;
+
+        static double Expected(int destinationPixel, double scale)
+        {
+            double start = destinationPixel / scale, end = (destinationPixel + 1) / scale, sum = 0;
+            for (int source = (int)start; source < end; source++)
+                sum += Line(source) * (Math.Min(source + 1, end) - Math.Max(source, start));
+            return sum * scale;
         }
     }
 

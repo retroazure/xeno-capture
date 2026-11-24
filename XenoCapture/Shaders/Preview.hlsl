@@ -2,8 +2,16 @@ struct Out {float4 pos:SV_POSITION; float2 uv:TEXCOORD;}; Out Vertex(uint id:SV_
 
 Texture2D image:register(t0); Texture2D chroma:register(t1); SamplerState linearClamp:register(s0);
 cbuffer Parameters:register(b0) { float4 p; float4 flags; float4 aiFootprint; };
-float3 color(float2 uv, bool nv12) {
- float3 c=image.Sample(linearClamp,uv).rgb;
+// For enlargement an output pixel spans at most one source-texel width.
+// Reposition a bilinear sample to reproduce its exact overlap weights.
+float2 coverageSamplePosition(float2 uv, float2 scale) {
+ float2 center = uv * p.xy;
+ float2 boundary = floor(center + .5);
+ float2 coverage = saturate((center - boundary) * scale + .5);
+ return (boundary - .5 + coverage) / p.xy;
+}
+float3 color(float2 uv, bool nv12, float2 detailUv) {
+ float3 c=image.Sample(linearClamp,detailUv).rgb;
  if(nv12) { float y=c.r; float2 cc=chroma.Sample(linearClamp,uv).rg-128.0/255.0;
   if(flags.x<0.5) y=(y-16.0/255.0)*255.0/219.0;
   float gain=flags.x<0.5?255.0/224.0:1;
@@ -12,6 +20,7 @@ float3 color(float2 uv, bool nv12) {
   c=float3(y+k.x*cc.y*gain,y-(k.y*cc.x+k.z*cc.y)*gain,y+blue*cc.x*gain); }
  return saturate(c);
 }
+float3 color(float2 uv, bool nv12) { return color(uv, nv12, uv); }
 float luma(float3 rgb) { return dot(rgb, float3(.2126,.7152,.0722)); }
 float edgeLuma(float2 uv, bool nv12) {
  float3 sampleColor=image.Sample(linearClamp,uv).rgb;
@@ -45,10 +54,7 @@ float3 resampleAi(float2 uv) {
   float3 bottom=lerp(aiTap(float2(x.x,y.y)/p.xy),aiTap(float2(x.y,y.y)/p.xy),wx);
   result=lerp(top,bottom,wy);
  } else {
-  // Preserve local contrast while staying within the same four texels.
-  float2 texel=uv*p.xy-.5, phase=frac(texel);
-  phase=lerp(phase,phase*phase*(3-2*phase),.55);
-  result=aiTap((floor(texel)+phase+.5)/p.xy);
+  result=aiTap(coverageSamplePosition(uv, max(1, rcp(footprint))));
  }
  return result;
 }
@@ -95,8 +101,15 @@ float3 filterAi(float2 uv, float3 center) {
  return center;
 }
 #else
+float3 nativeColor(float2 uv, bool nv12) {
+ float2 detailUv = uv;
+ [branch] if (aiFootprint.w > 1.005)
+  detailUv = coverageSamplePosition(uv, aiFootprint.ww);
+ // NV12 chroma has its own lower-resolution sample grid.
+ return color(uv, nv12, detailUv);
+}
 float3 filterPreview(float2 uv, bool nv12) {
- float3 c=color(uv,nv12);
+ float3 c=nativeColor(uv,nv12);
  float edgeBlend=0;
  [branch] if(flags.z>0) {
   float2 d=flags.zw;
@@ -110,6 +123,11 @@ float3 filterPreview(float2 uv, bool nv12) {
    float2 tangent=float2(-gradient.y,gradient.x)/max(abs(gradient.x),abs(gradient.y));
    float3 along=(color(uv+tangent*d,nv12)+color(uv-tangent*d,nv12))*.5;
    edgeBlend=.65*smoothstep(.035,.16,diagonal);
+   [branch] if (aiFootprint.w > 0) {
+    float center = edgeLuma(uv, nv12);
+    float outside = max(lo - center, center - hi);
+    edgeBlend *= 1 - smoothstep(.012, .05, outside);
+   }
    c=lerp(c,along,edgeBlend);
   }
  }
@@ -141,7 +159,7 @@ float4 Preview(float4 pos:SV_POSITION,float2 uv:TEXCOORD):SV_TARGET {
  return float4(aiColor, 1);
 #else
  // Plain draws also serve the RGB conversion used by motion analysis.
- [branch] if (flags.z <= 0 && p.z <= .001) return float4(color(uv, p.w > .5), 1);
+ [branch] if (flags.z <= 0 && p.z <= .001) return float4(nativeColor(uv, p.w > .5), 1);
  // Choose the source layout once, outside the color and edge sampling taps.
  [branch] if (p.w > .5) return float4(filterPreview(uv, true), 1);
  return float4(filterPreview(uv, false), 1);

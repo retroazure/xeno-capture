@@ -13,6 +13,9 @@ internal static class RenderPerformanceDiagnostics
         if (Array.IndexOf(Environment.GetCommandLineArgs(), "--ai-fit-benchmark") >= 0)
             return new() { ["cases"] = CompareAiReduction(), ["result"] = "PASS" };
 
+        if (Array.IndexOf(Environment.GetCommandLineArgs(), "--fullscreen-enlargement") >= 0)
+            return new() { ["cases"] = MeasureFullscreenEnlargement(), ["result"] = "PASS" };
+
         var construction = new List<double>();
         for (int i = 0; i < 8; i++)
         {
@@ -67,6 +70,32 @@ internal static class RenderPerformanceDiagnostics
             ["batchTimingIncludesFinalGpuReadback"] = true, ["measuresMonitorPresentation"] = false,
             ["captureHardware"] = "not exercised", ["result"] = "PASS" };
     }
+    static object MeasureFullscreenEnlargement()
+    {
+        using var source = Pattern(1920, 1080, PixelLayout.Nv12);
+        var cases = new List<object>();
+        foreach (int height in new[] { 1440, 2160 })
+        {
+            using var renderer = new D3DPreview(0, height * 16 / 9, height)
+                { RetainFullscreenOutput = true, EdgeSmoothing = true };
+            renderer.Draw(source, .25);
+            for (int i = 0; i < 40; i++) renderer.RedrawFullscreenMotion();
+            renderer.Readback();
+
+            var times = new List<double>();
+            const int frames = 120;
+            for (int batch = 0; batch < 7; batch++)
+            {
+                var timer = Stopwatch.StartNew();
+                for (int i = 0; i < frames; i++) renderer.RedrawFullscreenMotion();
+                renderer.Readback();
+                times.Add(timer.Elapsed.TotalMilliseconds / frames);
+            }
+            cases.Add(new { height, medianMs = times.Order().ElementAt(times.Count / 2) });
+        }
+        return cases;
+    }
+
     static object CompareAiReduction()
     {
         using var source = Pattern(3840, 2160, PixelLayout.Bgr32);

@@ -53,9 +53,8 @@ internal sealed partial class Direct3DHost
                 return;
             }
 
-            uint sourceInterval = prepareAhead && clockInterval != 0
-                ? FullscreenSourceCadence.RefreshInterval(frame.Duration, refreshHz) : 0;
-            bool useSteadyCadence = sourceInterval != 0;
+            bool useSteadyCadence = prepareAhead && clockInterval != 0
+                && FullscreenSourceCadence.RefreshInterval(frame.Duration, refreshHz) != 0;
             if (useSteadyCadence) host.DiagnosticSteadySourceDraw?.Invoke();
             long sourceDue = useSteadyCadence
                 ? steadyCadence.Deadline(frame.Time, frame.Duration, consumedArrival, refreshHz)
@@ -82,19 +81,9 @@ internal sealed partial class Direct3DHost
             if (!IsActive()) return;
 
             var shown = newest ?? frame;
-            // A slow inference, a changed presentation phase, or a replaced capture
-            // should leave the next refresh available to catch up.
-            long queuedAt = Clock.Now;
-            // Recovery needs to be able to fill a missed source interval without
-            // waiting for the previous real frame's multi-refresh reservation.
-            bool steadyPresent = useSteadyCadence && requested == FrameGenerationMode.Off && newest == null
-                && host.SteadyFullscreenPacing && host.FrameGeneration == requested
-                && Math.Abs(sourcePacing.Duration - frame.Duration) <= frame.Duration / 32
-                && Math.Abs(frame.Time - sourcePacing.Time - frame.Duration) <= frame.Duration / 4
-                && queuedAt - consumedArrival < 10_000_000 / refreshHz
-                && queuedAt - lastPresentedAt < frame.Duration + 10_000_000 / refreshHz;
-            bool accepted = Present(new PresentedFrame(shown.Time, shown.Duration),
-                refreshInterval: steadyPresent ? sourceInterval : 1);
+            // The capture clock supplies the cadence. Keep the next refresh
+            // available for an early capture or a frame recovering a gap.
+            bool accepted = Present(new PresentedFrame(shown.Time, shown.Duration));
             if (accepted && (requested == FrameGenerationMode.Off || prediction.RecoveringGaps))
             {
                 uint? presentCount = !useSteadyCadence && host.isFullscreen && paceSource && !entryAnimating
@@ -324,9 +313,13 @@ internal sealed partial class Direct3DHost
                 predictionStarted = true;
                 if (!Renderer.BeginPrediction()) { predictionReady = false; return true; }
             }
-            long lead = recoveringGaps ? 0
-                : Math.Clamp((long)(predictionDrawMs * 10_000) + 2_500, 2_500, Math.Min(15_000, interval / 4));
-            if (now < due - lead) { deadline!.WaitUntil(due - lead); return true; }
+            if (!recoveringGaps)
+            {
+                long lead = Math.Clamp((long)(predictionDrawMs * 10_000) + 2_500, 2_500, Math.Min(15_000, interval / 4));
+                if (now < due - lead) { deadline!.WaitUntil(due - lead); return true; }
+            }
+            // A capture is already late here. Resolve motion and queue the draw
+            // before its presentation time whenever the GPU has finished.
             long retryAt = recoveringGaps ? Math.Min(expires, due + 45_000) : due;
             if (predictionReady == null)
             {
@@ -365,6 +358,7 @@ internal sealed partial class Direct3DHost
             if (Clock.Now > expires || !CanShowPrediction(requested)) return true;
             var frame = Renderer.RenderPrediction(due - predictionArrival, interval, host.Sharpness, host.Upscaler);
             predictionDrawMs = Renderer.LastUploadDrawMs;
+            if (recoveringGaps && Clock.Now < due) Renderer.SubmitPendingDraw();
             while (Clock.Now < due && CanShowPrediction(requested)) deadline!.WaitUntil(due);
             if (Clock.Now <= expires && CanShowPrediction(requested))
                 predictionShown |= Present(frame);
